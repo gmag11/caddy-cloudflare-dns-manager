@@ -48,9 +48,15 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		}
 	}
 
-	// Group hosts by zone so each zone ID is resolved once.
+	// Group hosts by zone so each zone ID is resolved once. The zone is
+	// recomputed here from the declared zones (HostConfig.ZoneConfig is not
+	// serialized through the route handler config).
 	byZone := make(map[string][]HostConfig)
 	for _, hc := range hosts {
+		if err := assignZone(app.Zones, &hc); err != nil {
+			errs := []error{err}
+			return fmt.Errorf("1 host(s) failed: %v", errs)
+		}
 		zkey := strings.ToLower(hc.ZoneConfig.Zone)
 		byZone[zkey] = append(byZone[zkey], hc)
 	}

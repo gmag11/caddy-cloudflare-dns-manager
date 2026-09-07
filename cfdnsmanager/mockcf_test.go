@@ -129,3 +129,13 @@ func (m *mockCloudflare) server(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// startDetectionServer returns an httptest server returning ip=<publicIP>.
+func startDetectionServer(t *testing.T, publicIP string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ip=" + publicIP + "\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}

@@ -135,7 +135,7 @@ func parseDirective(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 		return nil, err
 	}
 
-	handler := hostHandler{host: hc}
+	handler := hostHandler{Host: hc}
 	return h.NewRoute(nil, handler), nil
 }
 
@@ -143,7 +143,8 @@ func parseDirective(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 // directive is a valid route inside site and handle blocks; its real job is
 // registering its host config with the app during Provision.
 type hostHandler struct {
-	host HostConfig
+	// Host is the parsed host declaration carried through config JSON.
+	Host HostConfig `json:"host,omitempty"`
 }
 
 // ServeHTTP passes the request through unchanged.
@@ -166,7 +167,7 @@ func (hh *hostHandler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("getting %s app for host registration: %v", appName, err)
 	}
 	app := appIface.(*App)
-	app.addHost(hh.host)
+	app.addHost(hh.Host)
 	return nil
 }
 

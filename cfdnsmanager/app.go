@@ -94,9 +94,15 @@ func (*App) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
+// lastProvisionedApp is a test hook capturing the most recently provisioned
+// App so in-package integration tests can inspect registered hosts and run
+// Start against a mock Cloudflare. It is never used in production paths.
+var lastProvisionedApp *App
+
 // Provision initializes the app.
 func (app *App) Provision(ctx caddy.Context) error {
 	app.logger = ctx.Logger()
+	lastProvisionedApp = app
 	if app.TagPrefix == "" {
 		app.TagPrefix = defaultTagPrefix
 	}

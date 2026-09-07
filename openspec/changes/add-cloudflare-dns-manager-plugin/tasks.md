@@ -20,24 +20,24 @@
 
 ## 4. Cloudflare client
 
-- [ ] 4.1 Implement a minimal Cloudflare REST client (list zone id by name, list/create/update/delete DNS records, with token auth) using the standard library or a vetted dependency. Verify against the Cloudflare API schema with recorded/httptest fixtures
-- [ ] 4.2 Verify client error handling surfaces HTTP/API errors with actionable messages. Verify tests simulate API error responses
+- [x] 4.1 Implement a minimal Cloudflare REST client (list zone id by name, list/create/update/delete DNS records, with token auth) using the standard library or a vetted dependency. Verify against the Cloudflare API schema with recorded/httptest fixtures
+- [x] 4.2 Verify client error handling surfaces HTTP/API errors with actionable messages. Verify tests simulate API error responses
 
 ## 5. Public IP detection
 
-- [ ] 5.1 Implement public IPv4 detection with configurable `ip_url`, defaulting to `https://cloudflare.com/cdn-cgi/trace`, run once per config load. Verify a test points `ip_url` at a local httptest server returning a trace/body and asserts the parsed IPv4
-- [ ] 5.2 Implement IPv4-only parsing and non-blocking failure semantics: warning log, leave existing auto-IP records, skip creating new auto-IP records, still reconcile explicit-IP hosts. Verify tests for endpoint returning IPv6, network error, and non-2xx response
+- [x] 5.1 Implement public IPv4 detection with configurable `ip_url`, defaulting to `https://cloudflare.com/cdn-cgi/trace`, run once per config load. Verify a test points `ip_url` at a local httptest server returning a trace/body and asserts the parsed IPv4
+- [x] 5.2 Implement IPv4-only parsing and non-blocking failure semantics: warning log, leave existing auto-IP records, skip creating new auto-IP records, still reconcile explicit-IP hosts. Verify tests for endpoint returning IPv6, network error, and non-2xx response
 
 ## 6. Reconciliation engine
 
-- [ ] 6.1 Implement per-host reconciliation on config load: effective IP selection (override vs shared detected public IP), comparing existing record, and create/update when drift exists, idempotent when matching. Verify unit tests for no-op match, new record creation, and IP/proxy-mode drift update
-- [ ] 6.2 Enforce private/reserved-IP => DNS-only even when `proxied yes`, and honor explicit `proxied no`. Verify tests with a CGNAT/private IP (e.g. `100.64.10.5`) and a public IP
-- [ ] 6.3 Tag created/adopted records with the ownership comment (`<tag_prefix>:<instance>`) and default instance to hostname. Verify tests assert the comment on create and the configurable prefix/instance paths
-- [ ] 6.4 Implement the conservative default (skip untagged records with a log) and `force_adopt` update-and-claim. Verify tests for both paths
+- [x] 6.1 Implement per-host reconciliation on config load: effective IP selection (override vs shared detected public IP), comparing existing record, and create/update when drift exists, idempotent when matching. Verify unit tests for no-op match, new record creation, and IP/proxy-mode drift update
+- [x] 6.2 Enforce private/reserved-IP => DNS-only even when `proxied yes`, and honor explicit `proxied no`. Verify tests with a CGNAT/private IP (e.g. `100.64.10.5`) and a public IP
+- [x] 6.3 Tag created/adopted records with the ownership comment (`<tag_prefix>:<instance>`) and default instance to hostname. Verify tests assert the comment on create and the configurable prefix/instance paths
+- [x] 6.4 Implement the conservative default (skip untagged records with a log) and `force_adopt` update-and-claim. Verify tests for both paths
 
 ## 7. Prune
 
-- [ ] 7.1 Implement per-zone `prune`: after forward reconciliation, list the zone's A records and delete only those tagged with this instance and no longer declared. Verify tests cover orphan deletion, kept-if-still-declared, and never-deleting untagged/other-instance records
+- [x] 7.1 Implement per-zone `prune`: after forward reconciliation, list the zone's A records and delete only those tagged with this instance and no longer declared. Verify tests cover orphan deletion, kept-if-still-declared, and never-deleting untagged/other-instance records
 
 ## 8. Integration and validation
 
