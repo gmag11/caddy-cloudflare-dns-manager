@@ -78,5 +78,20 @@ Declared zones form the managed set; each host maps to the longest matching decl
 
 ## Open Questions
 
-- Whether to back `dns_manage`'s route directive with a no-op middleware vs. a tiny dedicated HTTP app whose `Start`/config hook performs reconciliation. Resolvable during implementation without changing specs.
 - Exact Cloudflare endpoint/rate assumptions for the default IP trace endpoint. Resolvable at implementation time; the endpoint is configurable regardless.
+
+## Spike Findings and Decisions (recorded during apply)
+
+### D1 (decision): reconcile via a dedicated Caddy app; no request middleware
+
+Resolved the open question on how the route directive is backed. The global `cf_dns_manager` option returns an `httpcaddyfile.App{Name: "cloudflare_dns_manager", Value: <raw JSON of config>}` which the adapter injects into `cfg.AppsRaw` (httptype.go:276-280). Reconciliation runs in a small Caddy **app** module at config load (`Provision`/`Start`), not in request handling. The per-site `cf_dns_manager` directive contributes a no-op middleware handler whose `Provision` registers its single host into the app instance (obtained via `ctx.App`). Caddy provisions all modules before starting any app (caddy.go:443-446), so by the time the app's `Start` runs, every per-site host has registered; the app then reconciles once per reload, does a single public-IP detection shared by all auto hosts, and runs per-zone `prune`. This keeps request handling untouched and triggers reconciliation on every reload.
+
+### 1.3 Spike: matcher visibility from a nested `handle`
+
+Verified in the Caddy source (v2.11.4):
+- `httpcaddyfile` parses the global options block first, then per server block extracts matcher definitions (`matcherDefs`) and evaluates each segment directive (httptype.go:98-173).
+- Nested scopes (e.g. `handle`, `route`, `subroute`) copy the parent's `matcherDefs` **down** (directives.go:373-407), so a matcher defined at the server block level IS visible to a `dns_manage` directive nested inside a `handle`.
+- However, `matcherDefs` is unexported; the only public accessors are `Helper.MatcherToken()` / `Helper.ExtractMatcherSet()`, which consume the token that is expected to be the matcher name. A directive token sequence `host @foo` needs the map lookup, which is not exposed.
+- The adapter emits matcher defs into the compiled JSON as `caddy.ModuleMap` (matcher name -> module -> JSON), e.g. `{"host": [caddyhttp.MatchHost{...}]}`.
+
+**Conclusion**: matcher definitions propagate down into nested `handle` scopes and are reachable at adapt time via the public `Helper.MatcherToken()` / `Helper.ExtractMatcherSet()` helpers, which decode a matcher reference into its module map (e.g. `{"host": caddyhttp.MatchHost{...}}`). Because our `cf_dns_manager` grammar places `@ref` after a `host` subdirective (not as the directive's leading matcher token), the per-site parser resolves it with a dedicated lookup that reuses the same matcher-definition resolution. Where a matcher cannot be resolved to exactly one literal host, the adapter errors with guidance to use a literal FQDN. (See specs/caddyfile-config - "Matcher resolution to a single literal host".)
