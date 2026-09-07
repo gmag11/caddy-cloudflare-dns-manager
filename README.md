@@ -16,7 +16,7 @@ The plugin is a Caddy module. Build a Caddy binary with it using
 [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```
-xcaddy build --with github.com/gmartin/caddy-cloudflare-dns-manager
+xcaddy build --with github.com/gmag11/caddy-cloudflare-dns-manager
 ```
 
 ## Caddyfile

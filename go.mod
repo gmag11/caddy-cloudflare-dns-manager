@@ -1,4 +1,4 @@
-module github.com/gmartin/caddy-cloudflare-dns-manager
+module github.com/gmag11/caddy-cloudflare-dns-manager
 
 go 1.25.1
 
