@@ -57,6 +57,9 @@ type App struct {
 	hostsMu sync.Mutex `json:"-"`
 	// hosts accumulates per-site host declarations during adapt.
 	hosts []HostConfig `json:"-"`
+
+	// apiBase overrides the Cloudflare API base URL (test seam).
+	apiBase string `json:"-"`
 }
 
 // HostConfig is a single per-site host declaration.

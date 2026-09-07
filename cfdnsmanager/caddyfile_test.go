@@ -2,10 +2,14 @@ package cf_dns_manager
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
 func TestAdaptGlobalAndPerSite(t *testing.T) {
+	os.Setenv("CF_EXAMPLE", "testtoken")
+	defer os.Unsetenv("CF_EXAMPLE")
+
 	input := `
 {
 	cf_dns_manager {

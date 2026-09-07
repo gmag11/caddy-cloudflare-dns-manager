@@ -20,8 +20,13 @@ type cloudflareClient struct {
 }
 
 func newCloudflareClient(token string) *cloudflareClient {
+	return newCloudflareClientWithBase(cloudflareAPIBase, token)
+}
+
+// newCloudflareClientWithBase is a test seam allowing a custom API base URL.
+func newCloudflareClientWithBase(apiBase, token string) *cloudflareClient {
 	return &cloudflareClient{
-		apiBase: cloudflareAPIBase,
+		apiBase: apiBase,
 		token:   token,
 		http: &http.Client{
 			Timeout: httpTimeout,

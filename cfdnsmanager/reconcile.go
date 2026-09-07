@@ -20,7 +20,11 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 
 	zoneClients := make(map[string]*cloudflareClient)
 	for _, z := range app.Zones {
-		zoneClients[strings.ToLower(z.Zone)] = newCloudflareClient(z.APIToken)
+		if app.apiBase != "" {
+			zoneClients[strings.ToLower(z.Zone)] = newCloudflareClientWithBase(app.apiBase, z.APIToken)
+		} else {
+			zoneClients[strings.ToLower(z.Zone)] = newCloudflareClient(z.APIToken)
+		}
 	}
 
 	// Detect public IP once for all auto hosts. Failure is non-blocking.
@@ -52,9 +56,9 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	}
 
 	var (
-		wg     sync.WaitGroup
-		errMu  sync.Mutex
-		errs   []error
+		wg    sync.WaitGroup
+		errMu sync.Mutex
+		errs  []error
 	)
 
 	for zkey, zoneHosts := range byZone {
