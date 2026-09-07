@@ -1,6 +1,6 @@
 ## Context
 
-The repo is greenfield (no code yet, no `openspec/specs` beyond scaffolding). The plugin must integrate with Caddy's module system: a Caddyfile adapter (`caddyconfig/httpcaddyfile`) providing two `dns_manage` spellings (global options + per-site route directive), plus a module that runs reconciliation on config load. Target zone provider is Cloudflare via its REST API. See proposal.md - Why and the delta specs for the behavioral contract.
+The repo is greenfield (no code yet, no `openspec/specs` beyond scaffolding). The plugin must integrate with Caddy's module system: a Caddyfile adapter (`caddyconfig/httpcaddyfile`) providing two `cf_dns_manager` spellings (global options + per-site route directive), plus a module that runs reconciliation on config load. Target zone provider is Cloudflare via its REST API. See proposal.md - Why and the delta specs for the behavioral contract.
 
 Key Caddy constraints that shape the design:
 
@@ -11,7 +11,7 @@ Key Caddy constraints that shape the design:
 ## Goals / Non-Goals
 
 **Goals:**
-- Define two adapter entry points under one directive name (`dns_manage`) with the per-host spelling usable both in dedicated site blocks and inside `handle` blocks.
+- Define two adapter entry points under one directive name (`cf_dns_manager`) with the per-host spelling usable both in dedicated site blocks and inside `handle` blocks.
 - Resolve every declared host to a zone + relative record name at adapt time, failing loudly on undeclared zones, ambiguous matchers, or non-IPv4 overrides.
 - Reconcile Cloudflare A records on every config load with ownership tagging, conservative default, per-site `force_adopt`, and per-zone `prune`.
 - Keep the failure semantics for public-IP detection non-blocking (see specs/public-ip-detection).
@@ -27,15 +27,15 @@ Key Caddy constraints that shape the design:
 
 ### D1. Two adapter registrations under one name, no conflict
 
-Register `dns_manage` twice: as a global option (namespace `caddyconfig/httpcaddyfile` global options) and as an HTTP route directive. Context decides which parser runs. The route-directive form carries an ordered, low-priority placement that does not interfere with request handling (the directive only needs its `Provision`/config-load hook).
+Register `cf_dns_manager` twice: as a global option (namespace `caddyconfig/httpcaddyfile` global options) and as an HTTP route directive. Context decides which parser runs. The route-directive form carries an ordered, low-priority placement that does not interfere with request handling (the directive only needs its `Provision`/config-load hook).
 
 *Alternatives considered:* a distinct global-only directive name plus a per-site one. Rejected: user explicitly wanted the same name in both contexts and Caddy supports it cleanly.
 
 ### D2. Host resolution at adapt time; single-host contracts
 
-The per-site directive accepts either `@ref` or a literal FQDN. Because named matchers vanish after adaptation, `@ref` is resolved in the adapter against the matcher definitions visible in scope. Each `dns_manage` manages exactly one host: a matcher that maps to multiple hosts, or to no `host` rule, is an adapt-time error (specs/caddyfile-config). Multiple hosts are managed by repeating the directive.
+The per-site directive accepts either `@ref` or a literal FQDN. Because named matchers vanish after adaptation, `@ref` is resolved in the adapter against the matcher definitions visible in scope. Each `cf_dns_manager` manages exactly one host: a matcher that maps to multiple hosts, or to no `host` rule, is an adapt-time error (specs/caddyfile-config). Multiple hosts are managed by repeating the directive.
 
-*Risk flagged for spike:* whether a `dns_manage` nested inside a `handle` can see the site block's named matchers in the adapter's scope model. Fallback is requiring the directive at a scope where its `@ref` is visible, or using a literal FQDN.
+*Risk flagged for spike:* whether a `cf_dns_manager` nested inside a `handle` can see the site block's named matchers in the adapter's scope model. Fallback is requiring the directive at a scope where its `@ref` is visible, or using a literal FQDN.
 
 ### D3. Ownership via record comment tag
 
@@ -74,7 +74,7 @@ Declared zones form the managed set; each host maps to the longest matching decl
 ## Migration Plan
 
 - Greenfield: no existing deployment to migrate. First release introduces the directive shape; users adopt hosts gradually because behavior is opt-in and conservative by default.
-- Rollback: removing `dns_manage` directives (and any `prune` markers) stops all reconciliation; previously created records remain in Cloudflare unless the user removes them manually, so DNS is never broken by rollback alone.
+- Rollback: removing `cf_dns_manager` directives (and any `prune` markers) stops all reconciliation; previously created records remain in Cloudflare unless the user removes them manually, so DNS is never broken by rollback alone.
 
 ## Open Questions
 
@@ -84,13 +84,13 @@ Declared zones form the managed set; each host maps to the longest matching decl
 
 ### D1 (decision): reconcile via a dedicated Caddy app; no request middleware
 
-Resolved the open question on how the route directive is backed. The global `cf_dns_manager` option returns an `httpcaddyfile.App{Name: "cloudflare_dns_manager", Value: <raw JSON of config>}` which the adapter injects into `cfg.AppsRaw` (httptype.go:276-280). Reconciliation runs in a small Caddy **app** module at config load (`Provision`/`Start`), not in request handling. The per-site `cf_dns_manager` directive contributes a no-op middleware handler whose `Provision` registers its single host into the app instance (obtained via `ctx.App`). Caddy provisions all modules before starting any app (caddy.go:443-446), so by the time the app's `Start` runs, every per-site host has registered; the app then reconciles once per reload, does a single public-IP detection shared by all auto hosts, and runs per-zone `prune`. This keeps request handling untouched and triggers reconciliation on every reload.
+Resolved the open question on how the route directive is backed. The global `cf_dns_manager` option returns an `httpcaddyfile.App{Name: "cf_dns_manager", Value: <raw JSON of config>}` which the adapter injects into `cfg.AppsRaw` (httptype.go:276-280). Reconciliation runs in a small Caddy **app** module at config load (`Provision`/`Start`), not in request handling. The per-site `cf_dns_manager` directive contributes a no-op middleware handler whose `Provision` registers its single host into the app instance (obtained via `ctx.App`). Caddy provisions all modules before starting any app (caddy.go:443-446), so by the time the app's `Start` runs, every per-site host has registered; the app then reconciles once per reload, does a single public-IP detection shared by all auto hosts, and runs per-zone `prune`. This keeps request handling untouched and triggers reconciliation on every reload.
 
 ### 1.3 Spike: matcher visibility from a nested `handle`
 
 Verified in the Caddy source (v2.11.4):
 - `httpcaddyfile` parses the global options block first, then per server block extracts matcher definitions (`matcherDefs`) and evaluates each segment directive (httptype.go:98-173).
-- Nested scopes (e.g. `handle`, `route`, `subroute`) copy the parent's `matcherDefs` **down** (directives.go:373-407), so a matcher defined at the server block level IS visible to a `dns_manage` directive nested inside a `handle`.
+- Nested scopes (e.g. `handle`, `route`, `subroute`) copy the parent's `matcherDefs` **down** (directives.go:373-407), so a matcher defined at the server block level IS visible to a `cf_dns_manager` directive nested inside a `handle`.
 - However, `matcherDefs` is unexported; the only public accessors are `Helper.MatcherToken()` / `Helper.ExtractMatcherSet()`, which consume the token that is expected to be the matcher name. A directive token sequence `host @foo` needs the map lookup, which is not exposed.
 - The adapter emits matcher defs into the compiled JSON as `caddy.ModuleMap` (matcher name -> module -> JSON), e.g. `{"host": [caddyhttp.MatchHost{...}]}`.
 

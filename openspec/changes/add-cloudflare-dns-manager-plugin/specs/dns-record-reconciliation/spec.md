@@ -19,7 +19,7 @@ When a declared host has no existing A record in its zone, the plugin SHALL crea
 
 #### Scenario: New subdomain
 
-- **WHEN** a reload declares `dns_manage { host @foo }` and `foo.example.com` has no A record in Cloudflare
+- **WHEN** a reload declares `cf_dns_manager { host @foo }` and `foo.example.com` has no A record in Cloudflare
 - **THEN** the plugin creates the `foo` A record under `example.com` with the detected public IP
 
 #### Scenario: Apex missing

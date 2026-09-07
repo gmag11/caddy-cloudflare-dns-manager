@@ -2,18 +2,18 @@
 
 - [x] 1.1 Initialize a Go module for the plugin and verify `go build ./...` succeeds with a stub package
 - [x] 1.2 Add a minimal Caddy module skeleton (register module IDs) and verify `caddy list-modules` or a unit test imports the module without error
-- [x] 1.3 Spike: confirm whether a `dns_manage` directive nested inside a `handle` block can resolve the site block's named matchers at Caddyfile adapt time; record the finding and pick the directive placement (nested or site-level) accordingly. Verify by adapting a sample Caddyfile containing a wildcard site with `handle` and reading the produced JSON or error
+- [x] 1.3 Spike: confirm whether a `cf_dns_manager` directive nested inside a `handle` block can resolve the site block's named matchers at Caddyfile adapt time; record the finding and pick the directive placement (nested or site-level) accordingly. Verify by adapting a sample Caddyfile containing a wildcard site with `handle` and reading the produced JSON or error
 - [x] 1.4 Decide and record whether the route directive is implemented as a no-op middleware or a small HTTP app hook for config-load reconciliation (see design.md Open Questions). Verify the choice is documented in design.md
 
 ## 2. Caddyfile adapter: global options
 
-- [x] 2.1 Register `dns_manage` as a global option and parse zone declarations (`zone <zone> api_token <token>` plus optional `prune`, `ip_url`, `tag_prefix`, `instance`). Verify an adapt-time unit test parses a global block into the expected option struct
+- [x] 2.1 Register `cf_dns_manager` as a global option and parse zone declarations (`zone <zone> api_token <token>` plus optional `prune`, `ip_url`, `tag_prefix`, `instance`). Verify an adapt-time unit test parses a global block into the expected option struct
 - [x] 2.2 Enforce that any host reconciled maps to a declared zone, erroring on undeclared zones. Verify a test adapts a config referencing an undeclared zone and expects a descriptive error
 - [x] 2.3 Implement longest-suffix zone assignment and expose the declared zone set to later stages. Verify a unit test maps `a.app.example.com` to zone `app.example.com` when both `example.com` and `app.example.com` are declared
 
 ## 3. Caddyfile adapter: per-site directive
 
-- [x] 3.1 Register the route-directive form of `dns_manage` and parse `host @ref`/FQDN, `ip`, `proxied`, `force_adopt`. Verify an adapt-time test parses a site block and a `handle` block into host entries
+- [x] 3.1 Register the route-directive form of `cf_dns_manager` and parse `host @ref`/FQDN, `ip`, `proxied`, `force_adopt`. Verify an adapt-time test parses a site block and a `handle` block into host entries
 - [x] 3.2 Resolve `host @ref` to a single literal host at adapt time, erroring on unknown matchers, non-host matchers, or multi-host matchers. Verify tests cover the three error cases and the happy path
 - [x] 3.3 Validate `ip` values are IPv4 and that exactly one host is managed per directive (repeated directives for multiple hosts). Verify tests reject IPv6 overrides and multi-host `@ref`
 - [x] 3.4 Derive the record name and target zone for each resolved host, including apex (`@`) and nested names; ensure wildcard site addresses never become records. Verify unit tests for apex, nested, and wildcard-ignored cases
@@ -41,7 +41,7 @@
 
 ## 8. Integration and validation
 
-- [ ] 8.1 Wire reconciliation into config load and confirm it runs on each reload without blocking startup on detection failure. Verify by running Caddy with the plugin against a fixture Caddyfile and observing logs/config application
-- [ ] 8.2 Add an end-to-end fixture test (httptest Cloudflare + local detection endpoint) covering a full reconcile + prune cycle. Verify the fixture asserts the expected Cloudflare API call sequence
-- [ ] 8.3 Write or update Caddyfile documentation/examples for both directive contexts and the policy table (conservative/force_adopt/prune). Verify docs build/read cleanly
-- [ ] 8.4 Run `go vet`, `go test ./...`, and `gofmt -l` and confirm clean; validate the change's specs with `openspec validate add-cloudflare-dns-manager-plugin`
+- [x] 8.1 Wire reconciliation into config load and confirm it runs on each reload without blocking startup on detection failure. Verify by running Caddy with the plugin against a fixture Caddyfile and observing logs/config application
+- [x] 8.2 Add an end-to-end fixture test (httptest Cloudflare + local detection endpoint) covering a full reconcile + prune cycle. Verify the fixture asserts the expected Cloudflare API call sequence
+- [x] 8.3 Write or update Caddyfile documentation/examples for both directive contexts and the policy table (conservative/force_adopt/prune). Verify docs build/read cleanly
+- [x] 8.4 Run `go vet`, `go test ./...`, and `gofmt -l` and confirm clean; validate the change's specs with `openspec validate add-cloudflare-dns-manager-plugin`

@@ -4,8 +4,8 @@ Managing the DNS records of a zone currently requires manual, out-of-band edits 
 
 ## What Changes
 
-- Introduce a Caddy module that adds a `dns_manage` directive usable in two contexts: a global options block (zone registry + global settings) and per site/handle (a host declaration to reconcile).
-- Support multiple Cloudflare zones; each zone must be declared together with its API token. Using `dns_manage` with a host whose zone is not declared is a config error.
+- Introduce a Caddy module that adds a `cf_dns_manager` directive usable in two contexts: a global options block (zone registry + global settings) and per site/handle (a host declaration to reconcile).
+- Support multiple Cloudflare zones; each zone must be declared together with its API token. Using `cf_dns_manager` with a host whose zone is not declared is a config error.
 - Reconcile A records for each declared host on every config load: create missing records, update records owned by this plugin whose IP or proxy mode changed. IPv4 only; no AAAA handling.
 - Determine a host's IP as: an explicit `ip` override when present, otherwise the server's public IPv4 detected from a configurable endpoint (default Cloudflare's own trace endpoint), detected once per reload and shared by all auto hosts.
 - Treat IP detection failure as non-blocking: warn, do not change existing auto-host records, skip new auto-host records, but still reconcile hosts that have an explicit IP.
@@ -19,7 +19,7 @@ Managing the DNS records of a zone currently requires manual, out-of-band edits 
 
 ### New Capabilities
 
-- `caddyfile-config`: Caddyfile surface of the plugin — the global `dns_manage` options block (zone registry with per-zone API tokens, `prune`, `ip_url`, `tag_prefix`, `instance`), the per-site/handle `dns_manage` directive (`host @ref`/FQDN, `ip`, `proxied`, `force_adopt`), placement rules, and adapt-time validation errors.
+- `caddyfile-config`: Caddyfile surface of the plugin — the global `cf_dns_manager` options block (zone registry with per-zone API tokens, `prune`, `ip_url`, `tag_prefix`, `instance`), the per-site/handle `cf_dns_manager` directive (`host @ref`/FQDN, `ip`, `proxied`, `force_adopt`), placement rules, and adapt-time validation errors.
 - `public-ip-detection`: how the server's public IPv4 is obtained on each reload — configurable endpoint defaulting to Cloudflare's trace endpoint, single detection per load, and non-blocking failure semantics.
 - `dns-record-reconciliation`: the per-host reconcile behavior against Cloudflare zones — effective IP selection, zone assignment by longest-suffix match against declared zones, create/update of A records, proxied vs DNS-only rules (private IP forces DNS-only), and apex/sub-domain naming.
 - `record-ownership`: ownership model for Cloudflare records — tag prefix + instance id, conservative default that never modifies untagged records, per-site `force_adopt`, and per-zone `prune` that only removes this instance's orphaned records.

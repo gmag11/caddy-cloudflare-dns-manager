@@ -10,7 +10,7 @@ The plugin SHALL detect the server's public IPv4 once per config load and reuse 
 
 #### Scenario: Endpoint configured
 
-- **WHEN** the global options block sets `dns_manage { ip_url https://ip.example.net }`
+- **WHEN** the global options block sets `cf_dns_manager { ip_url https://ip.example.net }`
 - **THEN** the plugin queries that URL to detect the public IPv4
 
 #### Scenario: Default endpoint used
