@@ -1,0 +1,32 @@
+# Local AI agent tooling configuration
+.opencode/
+.commandcode/
+
+# Shared AI agent definitions/collateral in .github (keep workflows/)
+.github/agents/
+.github/skills/
+.github/prompts/
+
+# Go build output
+*.exe
+*.test
+*.out
+caddy-dns-manager
+/caddy
+
+# Test and coverage artifacts
+coverage.*
+*.coverprofile
+.cover/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor/OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
