@@ -19,6 +19,7 @@ import (
 //	cf_dns_manager {
 //	    zone <zone> api_token <token> [prune]
 //	    ip_url <url>
+//	    ip6_url <url>
 //	    tag_prefix <prefix>
 //	    instance <id>
 //	}
@@ -43,6 +44,14 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 				return nil, d.ArgErr()
 			}
 			app.IPURL = d.Val()
+			if d.NextArg() {
+				return nil, d.ArgErr()
+			}
+		case "ip6_url":
+			if !d.NextArg() {
+				return nil, d.ArgErr()
+			}
+			app.IP6URL = d.Val()
 			if d.NextArg() {
 				return nil, d.ArgErr()
 			}
@@ -107,6 +116,7 @@ func parseZone(d *caddyfile.Dispenser) (ZoneConfig, error) {
 //	cf_dns_manager {
 //	    host @ref|<fqdn>   # required
 //	    ip <ipv4>          # optional
+//	    ip6 false|auto|<ipv6>  # optional; default false
 //	    proxied yes|no     # optional
 //	    force_adopt        # optional
 //	}
@@ -201,10 +211,22 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 				return hc, h.ArgErr()
 			}
 			ip := h.Val()
-			if net.ParseIP(ip) == nil || !strings.Contains(ip, ".") {
+			if !isIPv4(ip) {
 				return hc, h.Errf("ip must be an IPv4 address, got %q", ip)
 			}
 			hc.IP = ip
+			if h.NextArg() {
+				return hc, h.ArgErr()
+			}
+		case "ip6":
+			if !h.NextArg() {
+				return hc, h.ArgErr()
+			}
+			ip6, err := normalizeIP6(h.Val())
+			if err != nil {
+				return hc, h.Errf("ip6: %v", err)
+			}
+			hc.IP6 = ip6
 			if h.NextArg() {
 				return hc, h.ArgErr()
 			}
@@ -303,3 +325,24 @@ func zonesFromOptions(h httpcaddyfile.Helper) ([]ZoneConfig, error) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// IP6Auto is the normalized ip6 value meaning "detect the public IPv6".
+// An empty IP6 value means disabled; any other value is a literal IPv6.
+const IP6Auto = "auto"
+
+// normalizeIP6 validates an `ip6` subdirective value and returns its canonical
+// form: "" for disabled (false/no/off), IP6Auto for detection, or the literal
+// IPv6 address. IPv4 and non-address values are rejected.
+func normalizeIP6(val string) (string, error) {
+	switch strings.ToLower(val) {
+	case "false", "no", "off":
+		return "", nil
+	case "auto", "public":
+		return IP6Auto, nil
+	}
+	ip := net.ParseIP(val)
+	if ip == nil || ip.To4() != nil || ip.To16() == nil {
+		return "", fmt.Errorf("must be false, auto, or an IPv6 address, got %q", val)
+	}
+	return val, nil
+}

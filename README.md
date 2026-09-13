@@ -1,14 +1,15 @@
 # caddy-cloudflare-dns-manager
 
-A Caddy plugin that keeps Cloudflare DNS A records in sync with hosts declared
-in the Caddyfile. For every declared public subdomain it ensures the Cloudflare
-record exists and points at the intended IPv4 — the server's detected public IP
-by default, or an explicit override (for example a Tailscale address).
+A Caddy plugin that keeps Cloudflare DNS A (and optionally AAAA) records in
+sync with hosts declared in the Caddyfile. For every declared public subdomain
+it ensures the Cloudflare record exists and points at the intended address —
+the server's detected public IP by default, or an explicit override (for
+example a Tailscale address).
 
-It is IPv4-only (A records; no AAAA), Cloudflare-only, and reconciles on every
-config load/reload. It never sweeps a zone: only hosts that explicitly opt in
-with a directive are managed, and records it did not create are left alone by
-default.
+It is Cloudflare-only and reconciles on every config load/reload. IPv4 (A
+records) is always managed; IPv6 (AAAA) is opt-in per host. It never sweeps a
+zone: only hosts that explicitly opt in with a directive are managed, and
+records it did not create are left alone by default.
 
 ## Build / install
 
@@ -68,6 +69,10 @@ per-site directive can reference a host under it. Global settings live here too.
 		# default: https://cloudflare.com/cdn-cgi/trace)
 		# ip_url https://ifconfig.me/ip
 
+		# ip6_url overrides the public-IPv6 detection endpoint (optional;
+		# default: https://api6.ipify.org, an IPv6-only endpoint)
+		# ip6_url https://v6.ident.me
+
 		# tag_prefix customizes the ownership-comment prefix (optional)
 		# tag_prefix caddy-cf-dns
 
@@ -79,10 +84,10 @@ per-site directive can reference a host under it. Global settings live here too.
 }
 ```
 
-- `prune` on a zone opts in to deleting this instance's orphaned A records
-  (records carrying this server's tag whose host is no longer declared). It
-  only ever deletes records tagged with this instance; records without the tag
-  or tagged by another instance are never touched.
+- `prune` on a zone opts in to deleting this instance's orphaned A/AAAA records
+  (records carrying this server's tag whose host is no longer declared, or whose
+  IPv6 was disabled). It only ever deletes records tagged with this instance;
+  records without the tag or tagged by another instance are never touched.
 - A host under a zone that is not declared is a configuration error.
 
 ### 2. Per-site / per-handle directive: opt a host in
@@ -109,6 +114,7 @@ wildcard), `cf_dns_manager` declares a single host to reconcile:
 		cf_dns_manager {
 			host @tail
 			ip 100.64.10.5      # explicit override (e.g. Tailscale)
+			ip6 auto            # manage AAAA with the detected public IPv6
 			proxied no          # DNS-only (default is proxied)
 			force_adopt         # adopt an existing untagged record
 		}
@@ -136,17 +142,19 @@ Subdirectives:
 | --- | --- |
 | `host <@ref\|fqdn>` | **Required.** The host to reconcile, as a named matcher (`@foo`, which must map to exactly one host) or a literal FQDN. One directive = one host; repeat the directive for more hosts. |
 | `ip <ipv4>` | Optional IPv4 override. When absent, the server's detected public IPv4 is used. |
-| `proxied yes\|no` | Cloudflare proxied (orange cloud) or DNS-only. Default `yes`. A private/reserved IP always forces DNS-only regardless. |
-| `force_adopt` | Update and claim an existing record that lacks the plugin's tag (otherwise untagged records are left untouched). |
+| `ip6 false\|auto\|<ipv6>` | IPv6 mode, per host. `false` (default) manages no AAAA. `auto` manages an AAAA with the detected public IPv6. A literal IPv6 (e.g. a Tailscale ULA `fd7a:115c:a1e0::1`) manages an AAAA with that address. |
+| `proxied yes\|no` | Cloudflare proxied (orange cloud) or DNS-only. Default `yes`. Applies to both A and AAAA. A private/reserved IP always forces DNS-only for that family regardless. |
+| `force_adopt` | Update and claim an existing record that lacks the plugin's tag (otherwise untagged records are left untouched). Applies per family. |
 
 ## Policy
 
-Every A record the plugin creates or adopts carries an ownership comment of the
-form `<tag_prefix>:<instance>`. That tag is the single source of truth for
-"does this record belong to me?".
+Every A/AAAA record the plugin creates or adopts carries an ownership comment of
+the form `<tag_prefix>:<instance>`. That tag is the single source of truth for
+"does this record belong to me?". Matching is per record family: an untagged
+AAAA is never adopted just because the plugin owns the A of the same name.
 
 ```
-existing A record for the host in Cloudflare?
+existing A/AAAA record for the host in Cloudflare?
    |
    +-- none          -> create (never destructive)
    |
@@ -157,18 +165,39 @@ existing A record for the host in Cloudflare?
    +-- other instance tag -> always left unchanged (even with force_adopt)
 ```
 
-Prune (per zone, opt-in) deletes only A records carrying this instance's tag
-whose host is no longer declared by the current config. Untagged records and
-records of other instances are never candidates, so multiple Caddy servers can
-share a zone safely.
+Prune (per zone, opt-in) deletes only A/AAAA records carrying this instance's
+tag whose host is no longer declared by the current config (or whose IPv6 was
+disabled with `ip6 false`). Eligibility comes solely from the declared
+configuration: a record skipped because public-IP detection failed is never
+pruned. Untagged records and records of other instances are never candidates, so
+multiple Caddy servers can share a zone safely.
 
 The plugin never touches TXT records, so ACME DNS-01 challenges (`tls { dns
 cloudflare ... }`) are unaffected.
 
 ## Public IP detection
 
-Auto-IP hosts share a single detection per config load against the configured
-`ip_url` (default Cloudflare's `https://cloudflare.com/cdn-cgi/trace`). If
-detection fails, Caddy still starts: the plugin logs a warning, leaves existing
-auto-IP records unchanged, and skips creating new auto-IP records until a later
-reload succeeds. Hosts with an explicit `ip` are unaffected.
+Auto-IP hosts share a single detection per config load per family: IPv4 against
+`ip_url` (default Cloudflare's `https://cloudflare.com/cdn-cgi/trace`) and, when
+any host uses `ip6 auto`, IPv6 against `ip6_url` (default the IPv6-only
+`https://api6.ipify.org`) in parallel with a shorter timeout. If detection
+fails for a family, Caddy still starts: the plugin logs a warning, leaves
+existing auto-IP records of that family unchanged, and skips creating new ones
+until a later reload succeeds. Hosts with an explicit `ip`/`ip6` are unaffected.
+
+### IPv6 and Tailscale
+
+A host with a public IPv4 and a Tailscale IPv6 ULA can publish both: the A
+record is proxied and the AAAA (ULA) is forced DNS-only, since Cloudflare cannot
+proxy to a private address. When the two families end up with different proxied
+states the plugin logs a warning and writes each record with its own forced
+mode.
+
+```
+cf_dns_manager {
+    host app.example.com
+    ip 203.0.113.7          # public IPv4 -> proxied A
+    ip6 fd7a:115c:a1e0::1   # Tailscale ULA -> DNS-only AAAA
+}
+```
+

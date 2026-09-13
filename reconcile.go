@@ -12,9 +12,10 @@ import (
 )
 
 // Reconcile reconciles the declared hosts against Cloudflare. It is called
-// once per config load from Start(). It performs a single public-IP detection
-// shared by all auto hosts, reconciles each host's A record, then runs per-zone
-// prune for zones that opted in.
+// once per config load from Start(). It performs one public-IP detection per
+// address family (in parallel), shared by all auto hosts, reconciles each
+// host's A and (when enabled) AAAA records, then runs per-zone prune for zones
+// that opted in.
 func (app *App) Reconcile(hosts []HostConfig) error {
 	ctx := context.Background()
 
@@ -27,26 +28,9 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		}
 	}
 
-	// Detect public IP once for all auto hosts. Failure is non-blocking.
-	var publicIP string
-	var ipDetectionFailed bool
-	hasAutoHosts := false
-	for _, hc := range hosts {
-		if hc.IP == "" {
-			hasAutoHosts = true
-			break
-		}
-	}
-	if hasAutoHosts {
-		ip, err := detectPublicIPv4(ctx, &http.Client{Timeout: httpTimeout}, app.effectiveIPURL())
-		if err != nil {
-			ipDetectionFailed = true
-			app.logger.Warn("could not detect public IPv4; leaving existing auto-IP records unchanged and skipping new auto-IP records",
-				zap.Error(err))
-		} else {
-			publicIP = ip
-		}
-	}
+	// Detect public IPs once per family for all auto hosts. Failures are
+	// non-blocking and independent between families.
+	publicIP, publicIP6, ipDetectionFailed, ip6DetectionFailed := app.detectPublicIPs(ctx, hosts)
 
 	// Group hosts by zone so each zone ID is resolved once. The zone is
 	// recomputed here from the declared zones (HostConfig.ZoneConfig is not
@@ -90,7 +74,8 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		wg.Add(1)
 		go func(zone string, cli *cloudflareClient, zoneHosts []HostConfig) {
 			defer wg.Done()
-			if err := app.reconcileZone(ctx, cli, zone, zoneHosts, publicIP, ipDetectionFailed); err != nil {
+			det := familyDetection{ipv4: publicIP, ipv6: publicIP6, ipv4Failed: ipDetectionFailed, ipv6Failed: ip6DetectionFailed}
+			if err := app.reconcileZone(ctx, cli, zone, zoneHosts, det); err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
@@ -105,14 +90,76 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	return nil
 }
 
+// familyDetection carries the shared public-IP detection results for one
+// reconcile run, one entry per family.
+type familyDetection struct {
+	ipv4       string
+	ipv6       string
+	ipv4Failed bool
+	ipv6Failed bool
+}
+
+// detectPublicIPs runs the required family detections in parallel and returns
+// the detected addresses and per-family failure flags.
+func (app *App) detectPublicIPs(ctx context.Context, hosts []HostConfig) (ipv4, ipv6 string, ipv4Failed, ipv6Failed bool) {
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		wantV4 bool
+		wantV6 bool
+	)
+	for _, hc := range hosts {
+		if hc.IP == "" {
+			wantV4 = true
+		}
+		if hc.IP6 == IP6Auto {
+			wantV6 = true
+		}
+	}
+
+	if wantV4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ip, err := detectPublicIPv4(ctx, &http.Client{Timeout: httpTimeout}, app.effectiveIPURL())
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				ipv4Failed = true
+				app.logger.Warn("could not detect public IPv4; leaving existing auto-IP records unchanged and skipping new auto-IP records",
+					zap.Error(err))
+			} else {
+				ipv4 = ip
+			}
+		}()
+	}
+	if wantV6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ip, err := detectPublicIPv6(ctx, &http.Client{Timeout: ip6DetectTimeout}, app.effectiveIP6URL())
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				ipv6Failed = true
+				app.logger.Warn("could not detect public IPv6; leaving existing auto-IP AAAA records unchanged and skipping new AAAA records",
+					zap.Error(err))
+			} else {
+				ipv6 = ip
+			}
+		}()
+	}
+	wg.Wait()
+	return ipv4, ipv6, ipv4Failed, ipv6Failed
+}
+
 // reconcileZone reconciles all hosts in one zone, then prunes if enabled.
 func (app *App) reconcileZone(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone string,
 	hosts []HostConfig,
-	publicIP string,
-	ipDetectionFailed bool,
+	det familyDetection,
 ) error {
 	zoneID, err := cli.zoneIDByName(ctx, zone)
 	if err != nil {
@@ -124,62 +171,97 @@ func (app *App) reconcileZone(
 		return fmt.Errorf("zone %q: listing records: %v", zone, err)
 	}
 
-	// Canonical map from zone-relative record name ("@", "foo", "a.b") to A
-	// records. Cloudflare returns record names as FQDNs, so they must be
-	// normalized to the same relative form the plugin computes for hosts.
-	byName := make(map[string][]cfDNSRecord)
+	// Canonical map from zone-relative record name ("@", "foo", "a.b") and
+	// record type to existing records. Cloudflare returns record names as
+	// FQDNs, so they must be normalized to the same relative form the plugin
+	// computes for hosts.
+	byName := make(map[string]map[string][]cfDNSRecord)
 	for _, r := range records {
 		key := canonicalNameKey(r.Name, zone)
-		byName[key] = append(byName[key], r)
+		if byName[key] == nil {
+			byName[key] = make(map[string][]cfDNSRecord)
+		}
+		byName[key][r.Type] = append(byName[key][r.Type], r)
 	}
 
-	reconciled := make(map[string]bool)
+	// managed marks the (name, type) pairs the declared configuration asks the
+	// plugin to manage. Prune eligibility is derived from this, never from
+	// whether a reconcile attempt succeeded: a family enabled in config but
+	// skipped by a transient detection failure stays managed and is spared.
+	managed := make(map[string]map[string]bool)
+	markManaged := func(key, recType string) {
+		if managed[key] == nil {
+			managed[key] = make(map[string]bool)
+		}
+		managed[key][recType] = true
+	}
+
 	tag := app.ownershipTag()
 
 	for _, hc := range hosts {
 		name := recordName(hc.Host, zone)
-		existing := byName[canonicalNameKey(name, zone)]
-		if err := app.reconcileOne(ctx, cli, zone, zoneID, hc, name, existing, tag, publicIP, ipDetectionFailed); err != nil {
+		key := canonicalNameKey(name, zone)
+
+		// A is always managed for a declared host.
+		markManaged(key, "A")
+		ipv4, ipv4OK := resolveFamilyIP(hc.IP, det.ipv4, det.ipv4Failed)
+		if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "A", ipv4, ipv4OK, byName[key]["A"], tag); err != nil {
 			app.logger.Error("reconcile host failed",
-				zap.String("host", hc.Host), zap.String("zone", zone), zap.Error(err))
-			continue
+				zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "A"), zap.Error(err))
 		}
-		reconciled[canonicalNameKey(name, zone)] = true
+
+		// AAAA is managed only when IPv6 is enabled in config.
+		if hc.IP6 != "" {
+			markManaged(key, "AAAA")
+			literal := ""
+			if hc.IP6 != IP6Auto {
+				literal = hc.IP6
+			}
+			ipv6, ipv6OK := resolveFamilyIP(literal, det.ipv6, det.ipv6Failed)
+			if ipv4OK && ipv6OK && isPrivateIP(ipv4) != isPrivateIP(ipv6) {
+				app.logger.Warn("mixed address families: proxied state differs per record",
+					zap.String("host", hc.Host), zap.String("zone", zone),
+					zap.String("ipv4", ipv4), zap.Bool("ipv4_proxied", !isPrivateIP(ipv4)),
+					zap.String("ipv6", ipv6), zap.Bool("ipv6_proxied", !isPrivateIP(ipv6)))
+			}
+			if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "AAAA", ipv6, ipv6OK, byName[key]["AAAA"], tag); err != nil {
+				app.logger.Error("reconcile host failed",
+					zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "AAAA"), zap.Error(err))
+			}
+		}
 	}
 
 	if app.zonePruneEnabled(zone) {
-		if err := app.pruneZone(ctx, cli, zone, zoneID, records, reconciled, tag); err != nil {
+		if err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag); err != nil {
 			return fmt.Errorf("zone %q: prune: %v", zone, err)
 		}
 	}
 	return nil
 }
 
-// reconcileOne handles a single host against its existing records.
-func (app *App) reconcileOne(
+// reconcileFamily handles a single (host, record type) pair against its
+// existing records of that type. available reports whether an effective IP was
+// resolved; when false the family is skipped with a warning and existing
+// records are left unchanged.
+func (app *App) reconcileFamily(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone, zoneID string,
 	hc HostConfig,
-	name string,
+	name, recType, ip string,
+	available bool,
 	existing []cfDNSRecord,
 	tag string,
-	publicIP string,
-	ipDetectionFailed bool,
 ) error {
-	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone))
+	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", recType))
 
-	ip := hc.IP
-	if ip == "" {
-		if ipDetectionFailed {
-			if len(existing) == 0 {
-				log.Warn("public IPv4 unavailable and host has no existing record; skipping creation")
-			} else {
-				log.Warn("public IPv4 unavailable; leaving existing record unchanged")
-			}
-			return nil
+	if !available {
+		if len(existing) == 0 {
+			log.Warn("public IP unavailable and host has no existing record; skipping creation")
+		} else {
+			log.Warn("public IP unavailable; leaving existing record unchanged")
 		}
-		ip = publicIP
+		return nil
 	}
 	if ip == "" {
 		log.Warn("no effective IP for host; skipping")
@@ -188,7 +270,9 @@ func (app *App) reconcileOne(
 
 	proxied := effectiveProxied(hc, ip)
 
-	// Find an existing record owned by this instance for this name.
+	// Find an existing record of this type owned by this instance for this
+	// name. Matching is strictly per type: an untagged record of the other
+	// family is never adopted here.
 	var owned *cfDNSRecord
 	var untagged *cfDNSRecord
 	for i := range existing {
@@ -203,7 +287,7 @@ func (app *App) reconcileOne(
 	}
 
 	desired := cfDNSRecord{
-		Type:    "A",
+		Type:    recType,
 		Name:    name,
 		Content: ip,
 		TTL:     1, // 1 = Auto
@@ -222,7 +306,7 @@ func (app *App) reconcileOne(
 			if err := cli.updateRecord(ctx, zoneID, owned.ID, *owned); err != nil {
 				return fmt.Errorf("updating record for %s: %v", hc.Host, err)
 			}
-			log.Info("updated A record",
+			log.Info("updated record",
 				zap.String("fqdn", hc.Host),
 				zap.String("name", name),
 				zap.String("old_content", oldContent),
@@ -264,7 +348,7 @@ func (app *App) reconcileOne(
 		if err := cli.createRecord(ctx, zoneID, desired); err != nil {
 			return fmt.Errorf("creating record for %s: %v", hc.Host, err)
 		}
-		log.Info("created A record",
+		log.Info("created record",
 			zap.String("fqdn", hc.Host),
 			zap.String("name", name),
 			zap.String("content", ip),
@@ -273,14 +357,27 @@ func (app *App) reconcileOne(
 	return nil
 }
 
-// pruneZone deletes A records tagged with this instance whose name is not in
-// the reconciled set.
+// resolveFamilyIP returns the effective IP for one address family and whether
+// it is available. A literal override always wins; otherwise the detected
+// value is used when detection succeeded.
+func resolveFamilyIP(literal, detected string, detectionFailed bool) (string, bool) {
+	if literal != "" {
+		return literal, true
+	}
+	if detectionFailed || detected == "" {
+		return "", false
+	}
+	return detected, true
+}
+
+// pruneZone deletes records tagged with this instance whose (name, type) is
+// not managed by the declared configuration.
 func (app *App) pruneZone(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone, zoneID string,
 	records []cfDNSRecord,
-	reconciled map[string]bool,
+	managed map[string]map[string]bool,
 	tag string,
 ) error {
 	for i := range records {
@@ -288,7 +385,8 @@ func (app *App) pruneZone(
 		if !isOwnedByInstance(r.Comment, tag) {
 			continue
 		}
-		if reconciled[canonicalNameKey(r.Name, zone)] {
+		key := canonicalNameKey(r.Name, zone)
+		if managed[key][r.Type] {
 			continue
 		}
 		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
@@ -296,7 +394,8 @@ func (app *App) pruneZone(
 		}
 		app.logger.Info("pruned orphan record",
 			zap.String("fqdn", fqdn(r.Name, zone)),
-			zap.String("name", canonicalNameKey(r.Name, zone)),
+			zap.String("name", key),
+			zap.String("record_type", r.Type),
 			zap.String("zone", zone),
 			zap.String("content", r.Content),
 			zap.String("record_id", r.ID))
@@ -332,14 +431,29 @@ func effectiveProxied(hc HostConfig, ip string) bool {
 }
 
 // isPrivateIP reports whether ip is in a private or reserved range that
-// Cloudflare cannot proxy.
+// Cloudflare cannot proxy. IPv4: private, loopback, link-local, CGNAT.
+// IPv6: ULA (fc00::/7), link-local (fe80::/10), loopback, multicast. A public
+// IPv6 is proxyable even though it is not IPv4.
 func isPrivateIP(ip string) bool {
 	parsed := net.ParseIP(ip)
-	if parsed == nil || parsed.To4() == nil {
+	if parsed == nil {
 		return true
 	}
-	return parsed.IsPrivate() || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() ||
-		parsed.IsLinkLocalMulticast() || isCGNAT(parsed.To4())
+	if v4 := parsed.To4(); v4 != nil {
+		return parsed.IsPrivate() || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() ||
+			parsed.IsLinkLocalMulticast() || isCGNAT(v4)
+	}
+	if parsed.IsLoopback() || parsed.IsLinkLocalUnicast() ||
+		parsed.IsLinkLocalMulticast() || parsed.IsMulticast() || isULA(parsed) {
+		return true
+	}
+	return false
+}
+
+// isULA reports whether ip is in fc00::/7 (unique local addresses), which
+// includes the Tailscale IPv6 range fd7a:115c:a1e0::/48.
+func isULA(ip net.IP) bool {
+	return len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc
 }
 
 // isCGNAT reports whether ip is in 100.64.0.0/10 (RFC 6598; Tailscale range).
@@ -360,6 +474,13 @@ func (app *App) effectiveIPURL() string {
 		return app.IPURL
 	}
 	return DefaultIPURL
+}
+
+func (app *App) effectiveIP6URL() string {
+	if app.IP6URL != "" {
+		return app.IP6URL
+	}
+	return DefaultIP6URL
 }
 
 func (app *App) zonePruneEnabled(zone string) bool {

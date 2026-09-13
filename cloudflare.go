@@ -150,9 +150,9 @@ func (c *cloudflareClient) zoneIDByName(ctx context.Context, zone string) (strin
 	return "", fmt.Errorf("zone %q not found for this token", zone)
 }
 
-// listARecords lists A records in a zone. When name is non-empty, filters to
-// that record name (exact match of the relative name Cloudflare uses, where
-// apex is "@" or empty).
+// listRecords lists the A and AAAA records in a zone. The Cloudflare API is
+// queried without a type filter (one paginated pass) and records of other
+// types are filtered out client-side.
 func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cfDNSRecord, error) {
 	var records []cfDNSRecord
 	// Cloudflare paginates at 100; DNS record counts are small in practice,
@@ -160,7 +160,6 @@ func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cf
 	page := 1
 	for {
 		q := url.Values{}
-		q.Set("type", "A")
 		q.Set("per_page", "100")
 		q.Set("page", fmt.Sprintf("%d", page))
 		var pageRecords []cfDNSRecord
@@ -168,7 +167,11 @@ func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cf
 		if err := c.do(ctx, http.MethodGet, path, nil, &pageRecords); err != nil {
 			return nil, err
 		}
-		records = append(records, pageRecords...)
+		for _, r := range pageRecords {
+			if r.Type == "A" || r.Type == "AAAA" {
+				records = append(records, r)
+			}
+		}
 		if len(pageRecords) < 100 {
 			break
 		}
@@ -177,19 +180,19 @@ func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cf
 	return records, nil
 }
 
-// createRecord creates an A record.
+// createRecord creates a DNS record (A or AAAA).
 func (c *cloudflareClient) createRecord(ctx context.Context, zoneID string, rec cfDNSRecord) error {
 	var created cfDNSRecord
 	return c.do(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", rec, &created)
 }
 
-// updateRecord updates an existing A record.
+// updateRecord updates an existing DNS record (A or AAAA).
 func (c *cloudflareClient) updateRecord(ctx context.Context, zoneID, recordID string, rec cfDNSRecord) error {
 	var updated cfDNSRecord
 	return c.do(ctx, http.MethodPut, "/zones/"+zoneID+"/dns_records/"+recordID, rec, &updated)
 }
 
-// deleteRecord deletes an A record.
+// deleteRecord deletes a DNS record (A or AAAA).
 func (c *cloudflareClient) deleteRecord(ctx context.Context, zoneID, recordID string) error {
 	var out cfResponse
 	return c.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+recordID, nil, &out)

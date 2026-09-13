@@ -20,6 +20,20 @@ The plugin SHALL provide a `cf_dns_manager` global options block in which each m
 - **WHEN** a per-site directive references a host under a zone that was not declared in the global `cf_dns_manager` block
 - **THEN** adapting the Caddyfile fails with an error identifying the zone and the offending site
 
+### Requirement: Global IPv6 detection endpoint option
+
+The plugin SHALL accept an optional `ip6_url` subdirective in the global `cf_dns_manager` block specifying the endpoint used to detect the host's public IPv6 address. When unset, a built-in IPv6-only default endpoint SHALL be used.
+
+#### Scenario: Custom ip6_url
+
+- **WHEN** the global block declares `ip6_url https://v6.example.net/ip`
+- **THEN** IPv6 detection queries that endpoint
+
+#### Scenario: ip6_url default
+
+- **WHEN** the global block declares no `ip6_url`
+- **THEN** IPv6 detection uses the built-in default endpoint
+
 ### Requirement: Per-site host opt-in directive
 
 The plugin SHALL provide a `cf_dns_manager` directive usable inside a site block or a route/handle block to declare a single host for DNS reconciliation. The directive SHALL accept either a named matcher reference (`host @foo`) or a literal FQDN. A host is only reconciled when its `cf_dns_manager` directive is present; hosts without the directive are never touched.
@@ -55,36 +69,55 @@ The plugin SHALL resolve a `host @ref` reference to exactly one literal hostname
 
 ### Requirement: Per-host IP override
 
-The plugin SHALL accept an optional `ip` subdirective inside a per-site `cf_dns_manager` directive. When present, that literal IPv4 is used for the host's record; when absent, the plugin uses the detected public IPv4 (see public-ip-detection). A `cf_dns_manager` directive SHALL manage exactly one host; multiple hosts with different IPs are expressed by repeating the directive.
+The plugin SHALL accept an optional `ip` subdirective inside a per-site `cf_dns_manager` directive. When present, that literal IPv4 is used for the host's A record; when absent, the plugin uses the detected public IPv4 (see public-ip-detection). The `ip` value MUST be an IPv4 address; IPv6 values are rejected with an adaptation error. A `cf_dns_manager` directive SHALL manage exactly one host; multiple hosts with different IPs are expressed by repeating the directive.
 
 #### Scenario: IP override provided
 
-- **WHEN** a site declares `cf_dns_manager { host @tail ip 100.64.10.5 }`
-- **THEN** the plugin reconciles that host's record to the literal IP `100.64.10.5`
+- **WHEN** a directive declares `cf_dns_manager { host @foo ip 192.0.2.10 }`
+- **THEN** the plugin reconciles `foo`'s A record to `192.0.2.10`
 
-#### Scenario: No IP override provided
+#### Scenario: IP override is IPv6
 
-- **WHEN** a site declares `cf_dns_manager { host @foo }` with no `ip`
-- **THEN** the plugin reconciles that host to the current detected public IPv4
+- **WHEN** a directive declares `ip 2001:db8::1`
+- **THEN** adapting the Caddyfile fails with an error stating `ip` requires an IPv4 address
 
 ### Requirement: Per-host proxy mode
 
-The plugin SHALL accept an optional `proxied` subdirective with values `yes`/`no`, defaulting to proxied. A `proxied yes` requests a Cloudflare proxied (orange-cloud) record; `proxied no` requests DNS-only. Records whose effective IP is private or reserved SHALL always be created DNS-only regardless of the directive.
+The plugin SHALL accept an optional `proxied yes|no` subdirective inside a per-site `cf_dns_manager` directive, defaulting to `yes`. The value SHALL apply to both the A and the AAAA record of the host. Cloudflare's inability to proxy private addresses still forces DNS-only per family (see dns-record-reconciliation).
 
-#### Scenario: Proxied default
+#### Scenario: Proxied applies to both families
 
-- **WHEN** a site declares `cf_dns_manager { host @foo }` with a public IP and no `proxied`
-- **THEN** the record is created or updated as proxied
+- **WHEN** a host declares `proxied yes` with both A and AAAA managed and both effective IPs public
+- **THEN** both records are created or updated proxied
 
-#### Scenario: Explicit DNS-only
+#### Scenario: Proxied no applies to both families
 
-- **WHEN** a site declares `cf_dns_manager { host @foo proxied no }` with a public IP
-- **THEN** the record is created or updated as DNS-only
+- **WHEN** a host declares `proxied no` with both A and AAAA managed
+- **THEN** both records are created or updated DNS-only
 
-#### Scenario: Private IP forces DNS-only
+### Requirement: Per-host IPv6 mode subdirective
 
-- **WHEN** a site declares `cf_dns_manager { host @tail ip 100.64.10.5 }` without `proxied` and Cloudflare would reject proxying a private IP
-- **THEN** the plugin still reconciles the record but as DNS-only
+The plugin SHALL accept an optional `ip6` subdirective inside a per-site `cf_dns_manager` directive with exactly one of: `false` (or `no`/`off`), `auto`, or a literal IPv6 address. The default SHALL be `false` and the absence of the subdirective SHALL be identical to `ip6 false`. When set to a literal address, the plugin SHALL manage an AAAA record with that address regardless of the host's own IPv6 capability. When set to `auto`, the plugin SHALL manage an AAAA record using the detected public IPv6. When set to `false`, the plugin SHALL NOT create, update, or adopt any AAAA record for the host.
+
+#### Scenario: ip6 auto declared
+
+- **WHEN** a directive declares `cf_dns_manager { host @foo ip6 auto }`
+- **THEN** the plugin manages an AAAA record for `foo` using the detected public IPv6
+
+#### Scenario: ip6 literal declared
+
+- **WHEN** a directive declares `cf_dns_manager { host @foo ip6 fd7a:115c:a1e0::1 }`
+- **THEN** the plugin manages an AAAA record for `foo` with content `fd7a:115c:a1e0::1`
+
+#### Scenario: ip6 absent or false
+
+- **WHEN** a directive declares no `ip6` subdirective or `ip6 false`
+- **THEN** the plugin takes no action on any AAAA record for that host
+
+#### Scenario: ip6 invalid value
+
+- **WHEN** the `ip6` subdirective has a value that is neither false/no/off, `auto`, nor a valid IPv6 address
+- **THEN** adapting the Caddyfile fails with an error naming the offending value
 
 ### Requirement: Adopt override directive
 

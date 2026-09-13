@@ -8,31 +8,50 @@ Defines how the plugin obtains the server's public IPv4 address on each Caddy re
 
 ### Requirement: Public IP detection on reload
 
-The plugin SHALL detect the server's public IPv4 once per config load and reuse that single value for every auto-IP host in that load. The detection endpoint SHALL be configurable via an `ip_url` global option; when unset, the plugin SHALL query a default Cloudflare-owned endpoint that reports the caller's IP.
+The plugin SHALL detect the server's public IPv4 address once per config load (reconcile) when at least one declared host has no explicit `ip` override. The plugin SHALL additionally detect the public IPv6 address in parallel when any host has `ip6 auto`. Detection of each family is independent; the failure of one family SHALL NOT block startup, reload, or the other family.
 
-#### Scenario: Endpoint configured
+#### Scenario: Detection on reload
 
-- **WHEN** the global options block sets `cf_dns_manager { ip_url https://ip.example.net }`
-- **THEN** the plugin queries that URL to detect the public IPv4
+- **WHEN** Caddy loads a configuration with at least one auto-IP host
+- **THEN** the plugin detects the public IPv4 once and shares it across all auto hosts
 
-#### Scenario: Default endpoint used
+#### Scenario: Failure does not block startup
 
-- **WHEN** no `ip_url` is configured
-- **THEN** the plugin queries the default endpoint (`https://cloudflare.com/cdn-cgi/trace`)
+- **WHEN** the IPv4 detection endpoint is unreachable during a config load
+- **THEN** Caddy still starts or reloads successfully, with the failure semantics below
 
-#### Scenario: Single detection per load
+### Requirement: Public IPv6 detection
 
-- **WHEN** several auto-IP hosts are reconciled in one reload
-- **THEN** the plugin performs one detection request and uses the same IP for all of them
+The plugin SHALL detect the host's public IPv6 address by querying the `ip6_url` endpoint (default endpoint when unset) when at least one declared host has IPv6 enabled with `ip6 auto`. IPv6 detection SHALL run in parallel with IPv4 detection and SHALL NOT depend on the IPv4 result.
 
-### Requirement: IPv4-only detection
+#### Scenario: IPv6 detected
 
-The plugin SHALL resolve the detected address to an IPv4. If the configured endpoint returns an IPv6 address or no IPv4, the plugin SHALL treat the detection as failed for the purpose of this requirement.
+- **WHEN** a host declares `ip6 auto` and the IPv6 detection endpoint returns an IPv6 address
+- **THEN** the plugin uses that address for the host's AAAA record
 
-#### Scenario: Endpoint returns IPv6
+#### Scenario: No IPv6 hosts
 
-- **WHEN** the detection endpoint returns an IPv6 address for a host without an explicit IP
-- **THEN** the plugin treats detection as unavailable and applies the failure semantics below
+- **WHEN** no declared host has IPv6 enabled with `ip6 auto`
+- **THEN** the plugin performs no IPv6 detection request
+
+### Requirement: Independent soft failure per family
+
+IPv6 detection failure (network error, non-2xx, malformed body, or a non-IPv6 result) SHALL be soft and independent of IPv4 detection: the plugin SHALL log a warning, skip creating AAAA records for `ip6 auto` hosts, and leave existing AAAA records of those hosts unchanged. IPv4 detection outcomes SHALL NOT be affected by IPv6 failures, and vice versa. Hosts with a literal `ip6` SHALL be reconciled normally regardless of detection outcomes.
+
+#### Scenario: v6 fails, v4 succeeds
+
+- **WHEN** IPv6 detection fails while IPv4 detection succeeds for a host with `ip6 auto`
+- **THEN** the plugin reconciles the A record normally and skips the AAAA with a warning
+
+#### Scenario: v6 failure leaves existing AAAA
+
+- **WHEN** IPv6 detection fails for an `ip6 auto` host that already has a plugin-owned AAAA record
+- **THEN** the plugin leaves that AAAA record unchanged
+
+#### Scenario: v4 fails, v6 succeeds
+
+- **WHEN** IPv4 detection fails while IPv6 detection succeeds for a host with `ip6 auto`
+- **THEN** the plugin reconciles the AAAA normally and applies v4 failure semantics to the A only
 
 ### Requirement: Non-blocking detection failure
 

@@ -48,3 +48,10 @@ The plugin SHALL detect the server's public IPv4 address once per config load (r
 
 - **WHEN** the IPv4 detection endpoint is unreachable during a config load
 - **THEN** Caddy still starts or reloads successfully, with the failure semantics below
+
+## REMOVED Requirements
+
+### Requirement: IPv4-only detection
+
+**Reason**: Superseded by family-specific detection: the plugin now detects IPv4 and IPv6 independently, each with its own endpoint and failure semantics (see the added requirements in this delta).
+**Migration**: Existing `ip_url` configurations keep working for IPv4; IPv6 detection uses `ip6_url` and is opt-in per host via `ip6 auto`.

@@ -109,3 +109,63 @@ func TestEndToEndWiring(t *testing.T) {
 		t.Error("tail (private ip) must be dns-only")
 	}
 }
+
+// TestEndToEndIPv6Wiring adapts a Caddyfile with ip6 auto, provisions it, and
+// confirms both A and AAAA records are reconciled, then that disabling IPv6
+// with prune retires the AAAA.
+func TestEndToEndIPv6Wiring(t *testing.T) {
+	os.Setenv("CF_EXAMPLE", "testtoken")
+	defer os.Unsetenv("CF_EXAMPLE")
+
+	m := newMockCloudflare(t, "example.com", nil)
+	m.zonePrune = true
+	cfSrv := m.server(t)
+
+	det4 := startDetectionServer(t, "203.0.113.50")
+	det6 := startDetectionServer(t, "2001:db8::50")
+
+	input := `{
+	cf_dns_manager {
+		zone example.com api_token {$CF_EXAMPLE} prune
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+		ip6 auto
+	}
+	respond "x"
+}
+`
+	adapter := cf_caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}
+	out, _, err := adapter.Adapt([]byte(input), nil)
+	if err != nil {
+		t.Fatalf("adapt: %v", err)
+	}
+	var cfg caddy.Config
+	if err := caddy.StrictUnmarshalJSON(out, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := caddy.Validate(&cfg); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	app := lastProvisionedApp
+	if app == nil {
+		t.Fatal("app was not provisioned")
+	}
+	app.apiBase = cfSrv.URL
+	app.IPURL = det4.URL
+	app.IP6URL = det6.URL
+	if err := app.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if rec := m.recordByNameType("@", "A"); rec == nil || rec.Content != "203.0.113.50" {
+		t.Errorf("apex A wrong: %+v", rec)
+	}
+	if rec := m.recordByNameType("@", "AAAA"); rec == nil || rec.Content != "2001:db8::50" {
+		t.Errorf("apex AAAA wrong: %+v", rec)
+	}
+}

@@ -28,10 +28,19 @@ const (
 	// DefaultIPURL is the default endpoint used to detect the public IPv4.
 	DefaultIPURL = "https://cloudflare.com/cdn-cgi/trace"
 
+	// DefaultIP6URL is the default endpoint used to detect the public IPv6.
+	// It is IPv6-only so a v4 result is unambiguously a misconfigured or
+	// fallen-back endpoint and is rejected by the parser.
+	DefaultIP6URL = "https://api6.ipify.org"
+
 	// defaultTagPrefix is used for the ownership comment when no prefix is set.
 	defaultTagPrefix = "caddy-cf-dns"
 	// httpTimeout bounds every outbound HTTP call (Cloudflare API + IP detection).
 	httpTimeout = 15 * time.Second
+	// ip6DetectTimeout bounds the optional IPv6 detection request. It runs in
+	// parallel with IPv4 detection, so a short timeout bounds v6 blackholes
+	// without slowing the reload.
+	ip6DetectTimeout = 5 * time.Second
 )
 
 // App is the Caddy app that reconciles Cloudflare DNS records.
@@ -43,6 +52,9 @@ type App struct {
 
 	// IPURL overrides the public-IP detection endpoint.
 	IPURL string `json:"ip_url,omitempty"`
+
+	// IP6URL overrides the public-IPv6 detection endpoint.
+	IP6URL string `json:"ip6_url,omitempty"`
 
 	// TagPrefix is the ownership-comment prefix.
 	TagPrefix string `json:"tag_prefix,omitempty"`
@@ -68,6 +80,10 @@ type HostConfig struct {
 	Host string `json:"host"`
 	// IP is an explicit IPv4 override; empty means "detected public IP".
 	IP string `json:"ip,omitempty"`
+	// IP6 selects the IPv6 behavior: empty (or "false") disables AAAA
+	// management, "auto" uses the detected public IPv6, and any other value is
+	// a literal IPv6 address to use. Absence is identical to disabled.
+	IP6 string `json:"ip6,omitempty"`
 	// Proxied requests Cloudflare proxied mode. Defaults to true.
 	Proxied *bool `json:"proxied,omitempty"`
 	// ForceAdopt allows adopting/updating an untagged existing record.

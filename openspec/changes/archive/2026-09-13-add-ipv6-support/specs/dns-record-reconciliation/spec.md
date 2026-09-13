@@ -110,10 +110,3 @@ When a declared host has an existing record of a given family that is owned by t
 
 - **WHEN** the plugin manages the AAAA of a host and an untagged A record exists with the same name (or the reverse)
 - **THEN** the plugin leaves the untagged record of the other family unchanged
-
-## REMOVED Requirements
-
-### Requirement: IPv4-only detection
-
-**Reason**: Superseded by family-specific detection (see public-ip-detection delta): the plugin now detects IPv4 and IPv6 independently, each with its own endpoint and failure semantics.
-**Migration**: Existing `ip_url` configurations keep working for IPv4; IPv6 detection uses `ip6_url` and is opt-in per host via `ip6 auto`.

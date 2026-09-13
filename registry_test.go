@@ -101,17 +101,25 @@ func TestIsPrivateIP(t *testing.T) {
 		"100.64.10.5", // CGNAT / Tailscale
 		"127.0.0.1",
 		"169.254.1.1",
+		"::1",               // loopback
+		"fd7a:115c:a1e0::1", // Tailscale ULA
+		"fd00::1",           // ULA
+		"fe80::1",           // link-local
+		"ff02::1",           // multicast
 	}
 	for _, ip := range privates {
 		if !isPrivateIP(ip) {
 			t.Errorf("expected %s to be private", ip)
 		}
 	}
-	pub := []string{"8.8.8.8", "1.1.1.1", "203.0.113.5"}
+	pub := []string{"8.8.8.8", "1.1.1.1", "203.0.113.5", "2001:db8::1", "2606:4700:4700::1111"}
 	for _, ip := range pub {
 		if isPrivateIP(ip) {
 			t.Errorf("expected %s to be public", ip)
 		}
+	}
+	if !isPrivateIP("not-an-ip") {
+		t.Error("malformed address must be treated as private")
 	}
 }
 

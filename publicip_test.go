@@ -40,6 +40,39 @@ func TestParseIPv4Body(t *testing.T) {
 	}
 }
 
+func TestParseIPv6Body(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+		err  bool
+	}{
+		{"2001:db8::1", "2001:db8::1", false},
+		{"fd7a:115c:a1e0::1\n", "fd7a:115c:a1e0::1", false},
+		{"ip=2001:db8::9\nfl=42\n", "2001:db8::9", false},
+		{"ip=203.0.113.9\n", "", true},
+		{"8.8.8.8", "", true},
+		{"::ffff:1.2.3.4", "", true},
+		{"hello world", "", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		got, err := parseIPv6Body(c.body)
+		if c.err {
+			if err == nil {
+				t.Errorf("parseIPv6Body(%q) expected error, got %q", c.body, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseIPv6Body(%q) unexpected error: %v", c.body, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseIPv6Body(%q) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
 func TestDetectPublicIPv4UsesConfiguredEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ip=203.0.113.42\n"))

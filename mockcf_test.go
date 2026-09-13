@@ -163,6 +163,18 @@ func (m *mockCloudflare) recordByName(name string) *cfDNSRecord {
 	return nil
 }
 
+// recordByNameType returns the stored record matching name and type, or nil.
+func (m *mockCloudflare) recordByNameType(name, recType string) *cfDNSRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.records {
+		if m.records[i].Name == name && m.records[i].Type == recType {
+			return &m.records[i]
+		}
+	}
+	return nil
+}
+
 // hasCall reports whether any recorded API call exactly equals s.
 func (m *mockCloudflare) hasCall(s string) bool {
 	m.mu.Lock()
