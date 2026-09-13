@@ -19,6 +19,37 @@ The plugin is a Caddy module. Build a Caddy binary with it using
 xcaddy build --with github.com/gmag11/caddy-cloudflare-dns-manager
 ```
 
+A prebuilt image that bakes the module into Caddy is available via the root
+`Dockerfile`:
+
+```
+docker build -t caddy-cloudflare-dns-manager .
+```
+
+To also include the [caddy-dns/cloudflare](https://github.com/caddy-dns/cloudflare)
+provider for ACME DNS-01 challenges:
+
+```
+xcaddy build \
+    --with github.com/gmag11/caddy-cloudflare-dns-manager \
+    --with github.com/caddy-dns/cloudflare
+```
+
+## Repository layout
+
+The Go package lives at the repository root so the module path resolves
+directly to it — no subdirectory is needed to reference or import the plugin.
+
+```
+.
+├── .github/workflows/   CI: build + test, and image build/push on tags
+├── Dockerfile           Caddy image with the module baked in
+├── LICENSE              Apache-2.0
+├── go.mod / go.sum      module github.com/gmag11/caddy-cloudflare-dns-manager
+├── *.go                 the plugin package (Caddy app, directives, reconcile)
+└── testenv/             local Docker harness for manual testing (not published)
+```
+
 ## Caddyfile
 
 ### 1. Global options: declare zones and their tokens
