@@ -37,6 +37,11 @@ When a declared host has no existing A record in its zone, the plugin SHALL crea
 - **WHEN** a site block address is a wildcard such as `*.example.com`
 - **THEN** the plugin does not attempt to create a wildcard record from the site address
 
+#### Scenario: Existing record returned with an FQDN name
+
+- **WHEN** the Cloudflare list API returns an existing record whose `name` is the fully-qualified `foo.example.com` (the API's real shape) and the plugin computes the relative name `foo`
+- **THEN** the plugin matches it as the existing record and does not attempt to create a duplicate
+
 ### Requirement: Update existing records
 
 When a declared host has an existing A record that is owned by the plugin and its IP or proxy mode differs from the configured values, the plugin SHALL update the record. Hosts whose existing record is not owned by the plugin SHALL only be updated when the host declares `force_adopt`.

@@ -45,3 +45,8 @@
 - [x] 8.2 Add an end-to-end fixture test (httptest Cloudflare + local detection endpoint) covering a full reconcile + prune cycle. Verify the fixture asserts the expected Cloudflare API call sequence
 - [x] 8.3 Write or update Caddyfile documentation/examples for both directive contexts and the policy table (conservative/force_adopt/prune). Verify docs build/read cleanly
 - [x] 8.4 Run `go vet`, `go test ./...`, and `gofmt -l` and confirm clean; validate the change's specs with `openspec validate add-cloudflare-dns-manager-plugin`
+
+## 9. Bugfix: FQDN record-name matching
+
+- [x] 9.1 Canonicalize the Cloudflare list API's FQDN record names to the plugin's zone-relative form before indexing, so an existing record is matched instead of recreated. Verify a regression test with an FQDN-named owned record asserting no duplicate-create and an update on drift; make the mock mirror Cloudflare's `81058 An identical record already exists` rejection and FQDN response shape
+

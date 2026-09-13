@@ -110,10 +110,12 @@ func (app *App) reconcileZone(
 		return fmt.Errorf("zone %q: listing records: %v", zone, err)
 	}
 
-	// Canonical map from record name ("@", "foo", "a.b") to A records.
+	// Canonical map from zone-relative record name ("@", "foo", "a.b") to A
+	// records. Cloudflare returns record names as FQDNs, so they must be
+	// normalized to the same relative form the plugin computes for hosts.
 	byName := make(map[string][]cfDNSRecord)
 	for _, r := range records {
-		key := canonicalNameKey(r.Name)
+		key := canonicalNameKey(r.Name, zone)
 		byName[key] = append(byName[key], r)
 	}
 
@@ -122,13 +124,13 @@ func (app *App) reconcileZone(
 
 	for _, hc := range hosts {
 		name := recordName(hc.Host, zone)
-		existing := byName[canonicalNameKey(name)]
+		existing := byName[canonicalNameKey(name, zone)]
 		if err := app.reconcileOne(ctx, cli, zone, zoneID, hc, name, existing, tag, publicIP, ipDetectionFailed); err != nil {
 			app.logger.Error("reconcile host failed",
 				zap.String("host", hc.Host), zap.String("zone", zone), zap.Error(err))
 			continue
 		}
-		reconciled[canonicalNameKey(name)] = true
+		reconciled[canonicalNameKey(name, zone)] = true
 	}
 
 	if app.zonePruneEnabled(zone) {
@@ -250,7 +252,7 @@ func (app *App) pruneZone(
 		if !isOwnedByInstance(r.Comment, tag) {
 			continue
 		}
-		if reconciled[canonicalNameKey(r.Name)] {
+		if reconciled[canonicalNameKey(r.Name, zone)] {
 			continue
 		}
 		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
@@ -321,9 +323,26 @@ func isOwnedByInstance(comment, ownTag string) bool {
 	return comment == ownTag
 }
 
-func canonicalNameKey(name string) string {
+// canonicalNameKey normalizes a record name to its zone-relative form used as
+// the reconciliation map key. Cloudflare returns record names as FQDNs (e.g.
+// "foo.example.com", or the zone apex "example.com"), while the plugin computes
+// relative names ("foo", "@"); both must map to the same key. Names that are
+// already relative (not ending in the zone suffix) pass through unchanged.
+func canonicalNameKey(name, zone string) string {
 	if name == "" {
 		return "@"
+	}
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	if name == zone {
+		return "@"
+	}
+	if strings.HasSuffix(name, "."+zone) {
+		rel := strings.TrimSuffix(name[:len(name)-len(zone)], ".")
+		if rel == "" {
+			return "@"
+		}
+		return rel
 	}
 	return name
 }

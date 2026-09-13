@@ -53,6 +53,26 @@ func TestAssignZoneLongestSuffix(t *testing.T) {
 	}
 }
 
+func TestCanonicalNameKey(t *testing.T) {
+	cases := []struct {
+		name, zone, want string
+	}{
+		{"foo", "example.com", "foo"},
+		{"foo.example.com", "example.com", "foo"},
+		{"@", "example.com", "@"},
+		{"", "example.com", "@"},
+		{"example.com", "example.com", "@"},
+		{"a.app.example.com", "example.com", "a.app"},
+		{"a.app", "example.com", "a.app"},
+		{"FOO.example.com.", "example.com", "foo"},
+	}
+	for _, c := range cases {
+		if got := canonicalNameKey(c.name, c.zone); got != c.want {
+			t.Errorf("canonicalNameKey(%q, %q) = %q, want %q", c.name, c.zone, got, c.want)
+		}
+	}
+}
+
 func TestIsPrivateIP(t *testing.T) {
 	privates := []string{
 		"10.0.0.1",

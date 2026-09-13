@@ -80,6 +80,50 @@ func TestReconcileIdempotentNoWrite(t *testing.T) {
 	}
 }
 
+// TestReconcileFQDNRecordName reproduces the real Cloudflare API shape: the
+// list endpoint returns record names as FQDNs, not the plugin's relative form.
+// A pre-existing owned record must be recognized (no duplicate create), and a
+// drifted one must be updated rather than recreated.
+func TestReconcileFQDNRecordName(t *testing.T) {
+	m := newMockCloudflare(t, "example.com", []cfDNSRecord{
+		{ID: "r1", Type: "A", Name: "test2.example.com", Content: "203.0.113.10", TTL: 1, Proxied: false, Comment: "caddy-cf-dns:test-host"},
+	})
+	app, _ := testApp(t, m, "203.0.113.10", true)
+
+	// Same IP: no write at all.
+	hosts := []HostConfig{
+		{
+			Host: "test2.example.com", IP: "203.0.113.10",
+			Proxied:    boolPtr(false),
+			ZoneConfig: ZoneConfig{Zone: "example.com", APIToken: "token"},
+		},
+	}
+	if err := app.Reconcile(hosts); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if m.hasCall("POST /zones/zone-example.com/dns_records") {
+		t.Error("existing FQDN-named record must not be recreated")
+	}
+	if m.hasCall("PUT /zones/zone-example.com/dns_records/r1") {
+		t.Error("record already in sync must not be updated")
+	}
+
+	// IP drift: update the existing record, still no create.
+	hosts[0].IP = "198.51.100.7"
+	if err := app.Reconcile(hosts); err != nil {
+		t.Fatalf("reconcile (drift): %v", err)
+	}
+	if m.hasCall("POST /zones/zone-example.com/dns_records") {
+		t.Error("must update, not recreate, an existing FQDN-named record")
+	}
+	if !m.hasCall("PUT /zones/zone-example.com/dns_records/r1") {
+		t.Error("expected update of the existing FQDN-named record")
+	}
+	if rec := m.recordByName("test2"); rec == nil || rec.Content != "198.51.100.7" {
+		t.Errorf("record not updated on drift: %+v", rec)
+	}
+}
+
 func TestReconcileUpdatesOnDrift(t *testing.T) {
 	m := newMockCloudflare(t, "example.com", []cfDNSRecord{
 		{ID: "r1", Type: "A", Name: "foo", Content: "1.2.3.4", TTL: 1, Proxied: false, Comment: "caddy-cf-dns:test-host"},

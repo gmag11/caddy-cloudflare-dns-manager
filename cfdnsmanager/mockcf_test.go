@@ -60,15 +60,38 @@ func (m *mockCloudflare) handleZone(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case strings.HasSuffix(path, "/dns_records") && r.Method == http.MethodGet:
-		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": m.records})
+		// Cloudflare returns record names as FQDNs; mirror that so tests cover
+		// the real name shape rather than the plugin's relative form.
+		out := make([]cfDNSRecord, len(m.records))
+		copy(out, m.records)
+		for i := range out {
+			out[i].Name = m.fqdn(out[i].Name)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": out})
 	case strings.HasSuffix(path, "/dns_records") && r.Method == http.MethodPost:
 		var rec cfDNSRecord
 		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+		rel := m.rel(rec.Name)
+		// Mirror Cloudflare's "identical record already exists" rejection so a
+		// failed lookup that leads to a duplicate create is caught by tests.
+		for i := range m.records {
+			if m.records[i].Name == rel && m.records[i].Type == rec.Type {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"errors": []map[string]any{
+						{"code": 81058, "message": "An identical record already exists."},
+					},
+				})
+				return
+			}
+		}
 		m.nextID++
 		rec.ID = fmt.Sprintf("rec-%d", m.nextID)
+		rec.Name = rel // store zone-relative internally
 		m.records = append(m.records, rec)
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": rec})
 	case strings.Contains(path, "/dns_records/") && r.Method == http.MethodPut:
@@ -79,6 +102,7 @@ func (m *mockCloudflare) handleZone(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rec.ID = id
+		rec.Name = m.rel(rec.Name) // store zone-relative internally
 		for i := range m.records {
 			if m.records[i].ID == id {
 				m.records[i] = rec
@@ -98,6 +122,33 @@ func (m *mockCloudflare) handleZone(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unhandled "+r.Method+" "+path, 404)
 	}
+}
+
+// fqdn maps a stored (relative) record name to the FQDN shape Cloudflare
+// returns from its API: "@" becomes the zone apex, "foo" becomes
+// "foo.<zone>". Names that are already FQDNs are returned unchanged.
+func (m *mockCloudflare) fqdn(name string) string {
+	if name == "@" {
+		return m.zoneName
+	}
+	if name == "" || strings.HasSuffix(name, "."+m.zoneName) || name == m.zoneName {
+		return name
+	}
+	return name + "." + m.zoneName
+}
+
+// rel is the inverse of fqdn: it maps a record name to the zone-relative form
+// used for internal storage and lookup.
+func (m *mockCloudflare) rel(name string) string {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	zone := strings.ToLower(m.zoneName)
+	if name == "" || name == zone {
+		return "@"
+	}
+	if strings.HasSuffix(name, "."+zone) {
+		return strings.TrimSuffix(name[:len(name)-len(zone)], ".")
+	}
+	return name
 }
 
 // recordByName returns the stored record matching the given name, or nil.
