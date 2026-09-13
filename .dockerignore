@@ -1,0 +1,20 @@
+# Build context is the repo root (see testenv/docker-compose.yml), so this
+# file lives at the repo root. It keeps secrets and VCS metadata out of the
+# Docker build context. Docker does not read .gitignore.
+
+# Secrets: never send to the build daemon/context.
+.env
+.env.*
+!.env.example
+
+# VCS / local tooling
+.git
+.gitignore
+.opencode/
+.commandcode/
+.github/
+
+# Local test harness excluded wholesale: the Dockerfile only needs go.mod,
+# go.sum and the root-level Go package. The Caddyfile and .env are
+# mounted/provided at runtime, not baked into the build.
+testenv
