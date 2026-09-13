@@ -53,6 +53,26 @@ func TestAssignZoneLongestSuffix(t *testing.T) {
 	}
 }
 
+func TestFQDN(t *testing.T) {
+	cases := []struct {
+		name, zone, want string
+	}{
+		{"foo", "example.com", "foo.example.com"},
+		{"@", "example.com", "example.com"},
+		{"", "example.com", "example.com"},
+		{"foo.example.com", "example.com", "foo.example.com"},
+		{"example.com", "example.com", "example.com"},
+		{"a.app", "example.com", "a.app.example.com"},
+		{"FOO", "Example.COM", "foo.example.com"},
+		{"foo.example.com.", "example.com", "foo.example.com"},
+	}
+	for _, c := range cases {
+		if got := fqdn(c.name, c.zone); got != c.want {
+			t.Errorf("fqdn(%q, %q) = %q, want %q", c.name, c.zone, got, c.want)
+		}
+	}
+}
+
 func TestCanonicalNameKey(t *testing.T) {
 	cases := []struct {
 		name, zone, want string

@@ -201,38 +201,60 @@ func (app *App) reconcileOne(
 	case owned != nil:
 		// Update only on drift.
 		if owned.Content != ip || owned.Proxied != proxied {
+			oldContent, oldProxied := owned.Content, owned.Proxied
 			owned.Content = ip
 			owned.Proxied = proxied
 			owned.Comment = tag
 			if err := cli.updateRecord(ctx, zoneID, owned.ID, *owned); err != nil {
 				return fmt.Errorf("updating record for %s: %v", hc.Host, err)
 			}
-			log.Info("updated A record", zap.String("name", name), zap.String("content", ip), zap.Bool("proxied", proxied))
+			log.Info("updated A record",
+				zap.String("fqdn", hc.Host),
+				zap.String("name", name),
+				zap.String("old_content", oldContent),
+				zap.String("content", ip),
+				zap.Bool("old_proxied", oldProxied),
+				zap.Bool("proxied", proxied))
 		} else {
-			log.Debug("record already in sync")
+			log.Debug("record already in sync", zap.String("fqdn", hc.Host), zap.String("name", name), zap.String("content", ip), zap.Bool("proxied", proxied))
 		}
 
 	case untagged != nil:
 		if !hc.ForceAdopt {
 			log.Info("existing untagged record not owned by this instance; leaving unchanged (add force_adopt to adopt)",
+				zap.String("fqdn", hc.Host),
+				zap.String("name", name),
 				zap.String("content", untagged.Content))
 			return nil
 		}
 		// Force adopt: overwrite content/proxy mode and claim ownership.
+		oldContent := untagged.Content
+		oldProxied := untagged.Proxied
 		untagged.Content = ip
 		untagged.Proxied = proxied
 		untagged.Comment = tag
 		if err := cli.updateRecord(ctx, zoneID, untagged.ID, *untagged); err != nil {
 			return fmt.Errorf("force-adopting record for %s: %v", hc.Host, err)
 		}
-		log.Info("force-adopted existing untagged record", zap.String("name", name), zap.String("record_id", untagged.ID))
+		log.Info("force-adopted existing untagged record",
+			zap.String("fqdn", hc.Host),
+			zap.String("name", name),
+			zap.String("record_id", untagged.ID),
+			zap.String("old_content", oldContent),
+			zap.String("content", ip),
+			zap.Bool("old_proxied", oldProxied),
+			zap.Bool("proxied", proxied))
 
 	default:
 		// No existing record: create.
 		if err := cli.createRecord(ctx, zoneID, desired); err != nil {
 			return fmt.Errorf("creating record for %s: %v", hc.Host, err)
 		}
-		log.Info("created A record", zap.String("name", name), zap.String("content", ip), zap.Bool("proxied", proxied))
+		log.Info("created A record",
+			zap.String("fqdn", hc.Host),
+			zap.String("name", name),
+			zap.String("content", ip),
+			zap.Bool("proxied", proxied))
 	}
 	return nil
 }
@@ -258,9 +280,28 @@ func (app *App) pruneZone(
 		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
 			return fmt.Errorf("deleting orphan %s (%s): %v", r.Name, r.ID, err)
 		}
-		app.logger.Info("pruned orphan record", zap.String("name", r.Name), zap.String("record_id", r.ID))
+		app.logger.Info("pruned orphan record",
+			zap.String("fqdn", fqdn(r.Name, zone)),
+			zap.String("name", canonicalNameKey(r.Name, zone)),
+			zap.String("zone", zone),
+			zap.String("content", r.Content),
+			zap.String("record_id", r.ID))
 	}
 	return nil
+}
+
+// fqdn returns the fully-qualified form of a record name relative to zone.
+// A name that is already fully-qualified (or the zone apex) passes through.
+func fqdn(name, zone string) string {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	if name == "" || name == "@" {
+		return zone
+	}
+	if name == zone || strings.HasSuffix(name, "."+zone) {
+		return name
+	}
+	return name + "." + zone
 }
 
 // effectiveProxied returns whether a record should be proxied, forcing
