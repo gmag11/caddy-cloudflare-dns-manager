@@ -5,4 +5,4 @@
 // which registers managed Cloudflare zones (with their API tokens) and global
 // settings, and a per-site directive `cf_dns_manager` which opts a single
 // host in to DNS management.
-package cf_dns_manager
+package cfdnsmanager

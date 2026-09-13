@@ -1,4 +1,4 @@
-package cf_dns_manager
+package cfdnsmanager
 
 import (
 	"fmt"
