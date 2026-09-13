@@ -135,13 +135,11 @@ func (app *App) Validate() error {
 	return nil
 }
 
-// Start runs reconciliation for every declared host.
+// Start runs reconciliation for every declared host. It also runs when no
+// hosts are declared, so prune-only zones still clean up this instance's
+// orphaned records after the last host is removed.
 func (app *App) Start() error {
 	hosts := app.hostsSnapshot()
-	if len(hosts) == 0 {
-		app.logger.Debug("no hosts declared for cf_dns_manager; skipping reconcile")
-		return nil
-	}
 	if err := app.Reconcile(hosts); err != nil {
 		return fmt.Errorf("cf_dns_manager reconcile: %v", err)
 	}

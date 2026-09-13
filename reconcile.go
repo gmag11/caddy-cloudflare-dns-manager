@@ -61,6 +61,20 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		byZone[zkey] = append(byZone[zkey], hc)
 	}
 
+	// Zones that opted in to prune must be visited even when no host is
+	// declared, so removing the last declared host still cleans up that
+	// instance's orphaned records. Without this, a config with zero hosts
+	// would skip reconcile entirely and leave the final record behind.
+	for _, z := range app.Zones {
+		if !z.Prune {
+			continue
+		}
+		zkey := strings.ToLower(z.Zone)
+		if _, ok := byZone[zkey]; !ok {
+			byZone[zkey] = nil
+		}
+	}
+
 	var (
 		wg    sync.WaitGroup
 		errMu sync.Mutex

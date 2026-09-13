@@ -297,3 +297,25 @@ func TestNoPruneWithoutOptIn(t *testing.T) {
 		t.Error("orphans must be left in place when prune is not enabled")
 	}
 }
+
+// TestPruneWithNoDeclaredHosts covers removing the last declared host: the
+// zone opted in to prune, so reconcile must still run and delete this
+// instance's now-orphaned record even though there are zero hosts.
+func TestPruneWithNoDeclaredHosts(t *testing.T) {
+	m := newMockCloudflare(t, "example.com", []cfDNSRecord{
+		{ID: "r1", Type: "A", Name: "last", Content: "203.0.113.10", TTL: 1, Proxied: true, Comment: "caddy-cf-dns:test-host"},
+		{ID: "r2", Type: "A", Name: "manual", Content: "203.0.113.10", TTL: 1, Proxied: true, Comment: ""},
+	})
+	m.zonePrune = true
+	app, _ := testApp(t, m, "203.0.113.10", true)
+
+	if err := app.Reconcile(nil); err != nil {
+		t.Fatalf("reconcile with no hosts: %v", err)
+	}
+	if !m.hasCall("DELETE /zones/zone-example.com/dns_records/r1") {
+		t.Error("last host's own record must be pruned when no hosts remain declared")
+	}
+	if m.hasCall("DELETE /zones/zone-example.com/dns_records/r2") {
+		t.Error("untagged record must never be pruned")
+	}
+}
