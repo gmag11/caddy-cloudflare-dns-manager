@@ -218,18 +218,30 @@ ingress:
 Use the **service name** (`caddy`) as the origin host, not `localhost`: inside
 the compose network `localhost` is the cloudflared container itself.
 
+#### HTTPS origin with multiple hosts
+
 If Caddy redirects HTTP to HTTPS (the default), aiming at `:80` causes a
-redirect loop through the edge. Either use the HTTPS listener with the right
-SNI:
+redirect loop through the edge. Point the ingress at the HTTPS listener — and
+for more than one hostname, use `matchSNItoHost: true` so `cloudflared` sends
+each request's `Host` as SNI and Caddy presents the matching certificate:
 
 ```yaml
-  - hostname: app.example.com
+ingress:
+  # Dynamic: every declared subdomain reaches Caddy; add hosts in the
+  # Caddyfile only, no ingress edits needed.
+  - hostname: "*.example.com"
     service: https://caddy:443
     originRequest:
-      originServerName: app.example.com
+      matchSNItoHost: true
+  # Required catch-all:
+  - service: http_status:404
 ```
 
-or serve that hostname plain-HTTP intentionally.
+Do **not** use a fixed `originServerName` with a wildcard or catch-all rule: it
+pins a single SNI and breaks every other host. A plain catch-all
+(`- service: https://caddy:443`) also works but routes hostnames you never
+declared to the plugin — scope it with the wildcard rule above. Full reference:
+[cloudflare-tunnel.md](cloudflare-tunnel.md#the-tunnel-ingress-configuration-cloudflared-side).
 
 The Caddyfile side is unchanged — the `tunnel` directive (see
 [cloudflare-tunnel.md](cloudflare-tunnel.md)) makes the plugin create the

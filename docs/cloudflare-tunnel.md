@@ -73,21 +73,105 @@ cloudflared tunnel create my-server # prints the tunnel UUID
 `tunnel create` writes a credentials file named `<TUNNEL-UUID>.json` (default
 location `~/.cloudflared/`). Keep it secret; it authenticates this tunnel.
 
-Create a `config.yml`:
+#### Doing it with the Docker image (no host install)
+
+The same two commands work with the official container image — useful when the
+host has no `cloudflared` installed, and it is exactly how the test environment
+provisions its tunnel directory.
+
+Three details to know first:
+
+- `tunnel login` **always writes to the container user's home**,
+  `/home/nonroot/.cloudflared` — not to the path you happen to pass with `-v`.
+  So the setup mounts the host directory at `/home/nonroot/.cloudflared`, which
+  is where both `cert.pem` and `<UUID>.json` land.
+- The image runs as user `nonroot` (uid 65532, home `/home/nonroot`) and
+  resolves its home from `/etc/passwd`, **not** from `$HOME`. Running the
+  container with `--user <uid>` does **not** work for this: the uid has no
+  passwd entry and cloudflared cannot find its home. Use the image's default
+  user and make the mounted directory writable instead.
+- The directory must be **writable by uid 65532**. On the host, make it
+  world-writable for the setup (`chmod 777`) or `chown` it to 65532; the files
+  end up owned by 65532 but world-readable.
+
+From the directory that will hold the tunnel files (e.g. `./tunnel/`):
+
+```bash
+mkdir -p tunnel && chmod 777 tunnel
+
+# 1) Authorize against the account (writes cert.pem) — interactive, open the URL
+docker run -it --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared" \
+  cloudflare/cloudflared:latest tunnel login
+
+# 2) Create the tunnel (writes <TUNNEL-UUID>.json)
+docker run --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared" \
+  cloudflare/cloudflared:latest tunnel create my-server
+
+# 3) Read back the tunnel UUID (it is also the credentials filename)
+ls tunnel/*.json
+docker run --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared:ro" \
+  cloudflare/cloudflared:latest tunnel list
+```
+
+> `tunnel login` writes the certificate **only after** you complete the browser
+> flow. Keep the command running until it prints `You have successfully logged
+> in`; if the container is removed early (or the mount is wrong) the cert is
+> lost and the next command fails with *Cannot determine default origin
+> certificate path* or *Cannot find a valid certificate*.
+
+After this, `tunnel/` contains:
+
+```
+tunnel/
+├── cert.pem            # account certificate (gitignore!)
+└── <TUNNEL-UUID>.json  # tunnel credentials   (gitignore!)
+```
+
+Both files must be kept secret (`cert.pem` can manage **all** tunnels in the
+account; the JSON can only run this one). Add them to `.gitignore`:
+
+```gitignore
+tunnel/cert.pem
+tunnel/*.json
+```
+
+Restore the directory permissions for day-to-day use and keep the runtime
+container read-only:
+
+```bash
+chmod 755 tunnel
+```
+
+Create the ingress rules file `tunnel/config.yml` (this one *is* versionable —
+no secrets in it):
 
 ```yaml
-tunnel: <TUNNEL-UUID>
-credentials-file: /home/user/.cloudflared/<TUNNEL-UUID>.json
 ingress:
   - hostname: app.example.com
-    service: http://localhost:8080
+    service: http://caddy:80   # or https://caddy:443 — see the note below
   # Required catch-all:
   - service: http_status:404
 ```
 
-Run it: `cloudflared tunnel --no-config ... run` or simply
-`cloudflared tunnel run <TUNNEL-UUID>` (it reads `config.yml` from the default
-directory).
+Then run the connector as a service (see
+[docker-deployment.md](docker-deployment.md#4-adding-a-cloudflare-tunnel) for a
+full compose example). Note the mount target changes from the setup commands:
+at runtime the same host directory is mounted at `/etc/cloudflared` and the
+credentials file is passed explicitly with `--cred-file`:
+
+```bash
+docker run -d --name cloudflared --restart unless-stopped \
+  -v "$PWD/tunnel:/etc/cloudflared:ro" \
+  cloudflare/cloudflared:latest \
+  tunnel --no-autoupdate \
+    --config /etc/cloudflared/config.yml \
+    --cred-file /etc/cloudflared/<TUNNEL-UUID>.json \
+    run <TUNNEL-UUID>
+```
+
+The runtime container mounts the directory read-only: it reads the credentials
+(world-readable) but cannot write. Only the one-time `login`/`create` steps need
+write access to `tunnel/`.
 
 > If your local service is Caddy itself and it redirects HTTP to HTTPS, point
 > the ingress at the HTTPS listener (`https://localhost:443`) with
@@ -216,6 +300,8 @@ The tunnel itself is not touched by the plugin; remove it separately with
 
 ## Reference
 
+### The `tunnel` subdirective (plugin side)
+
 | Subdirective | Value | Notes |
 | --- | --- | --- |
 | `tunnel` | `<uuid>` | Marks the host tunnel-backed. Reconciles a proxied CNAME to `<uuid>.cfargotunnel.com`. |
@@ -228,3 +314,97 @@ Notes:
 - The plugin only manages the DNS routing record. Adding hostnames to the DNS
   does not by itself route traffic: each hostname also needs a matching ingress
   rule in the tunnel configuration.
+
+### The tunnel ingress configuration (`cloudflared` side)
+
+The plugin manages DNS; `cloudflared` decides *where* each hostname goes. That
+mapping lives in the tunnel configuration — the locally-managed `config.yml` or
+the dashboard for a remotely-managed tunnel. Two hard rules:
+
+1. **A config file must exist.** A locally-managed tunnel with an empty config
+   fails: *"No configuration file was found"*. The `ingress` key is mandatory
+   (it is the only thing you need — `tunnel:` and `credentials-file:` can come
+   from the command line as shown above).
+2. **The last rule must be a catch-all** (no `hostname`, no `path`). Validation
+   fails otherwise: *"The last ingress rule must match all URLs"*.
+
+#### Minimal config (all hostnames → one Caddy)
+
+If Caddy serves every hostname (routing by `Host`), a single catch-all rule is
+enough. This is the dynamic setup: **add a host to the plugin and it works —
+no ingress changes.**
+
+```yaml
+ingress:
+  - service: https://caddy:443
+    originRequest:
+      matchSNItoHost: true
+```
+
+#### HTTPS origin and `matchSNItoHost`
+
+The default SNI when connecting to your HTTPS origin is the *service URL's*
+hostname (`caddy`), which will not match a certificate issue for your public
+hostnames. `matchSNItoHost: true` makes `cloudflared` send the request's `Host`
+as SNI, so Caddy presents the matching certificate (e.g. its `*.example.com`
+wildcard) for every host. This is what makes the catch-all work with HTTPS and
+multiple hosts.
+
+Alternatives, and why they are worse here:
+
+| Option | Works with many hosts? | Notes |
+| --- | --- | --- |
+| `matchSNItoHost: true` | ✅ | SNI follows the request `Host`. **Preferred.** |
+| `originServerName: <host>` | ❌ | A single fixed SNI; breaks the second host. Use only per-host rules. |
+| `noTLSVerify: true` | ✅ | Disables origin verification; last resort only. |
+| Origin over plain `http://` | ✅ | Only if the origin does not redirect HTTP→HTTPS. |
+
+#### Scoping: wildcard or per-host rules
+
+Rules match top to bottom; the first match wins.
+
+```yaml
+ingress:
+  # Only your subdomains reach Caddy; anything else 404s at the edge.
+  - hostname: "*.example.com"
+    service: https://caddy:443
+    originRequest:
+      matchSNItoHost: true
+  - service: http_status:404
+```
+
+- `"*.example.com"` also matches deeper names (`a.b.example.com`) — wildcards
+  match at any depth.
+- A plain catch-all (`- service: https://caddy:443`) routes **everything**,
+  including hostnames you never declared to the plugin. Scope with a wildcard
+  or an explicit list if the tunnel should only serve your domains.
+- Route specific hostnames elsewhere with earlier rules (path matching and
+  non-HTTP services like `ssh://`, `tcp://` are supported):
+
+```yaml
+ingress:
+  - hostname: app.example.com
+    path: /api/.*
+    service: http://api:8081
+  - hostname: "*.example.com"
+    service: https://caddy:443
+    originRequest:
+      matchSNItoHost: true
+  - service: http_status:404
+```
+
+#### Validate and test before restarting
+
+```bash
+# Syntax + the catch-all rule
+docker run --rm -v "$PWD/tunnel:/etc/cloudflared:ro" \
+  cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/config.yml ingress validate
+
+# Which rule matches a URL (first match)
+docker run --rm -v "$PWD/tunnel:/etc/cloudflared:ro" \
+  cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/config.yml \
+  ingress rule https://app.example.com/api/v1
+```
+
+Editing `config.yml` does not restart a running connector — recreate it (see
+[docker-deployment.md](docker-deployment.md#5-reloading-configuration)).
