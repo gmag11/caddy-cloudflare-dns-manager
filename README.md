@@ -45,11 +45,19 @@ directly to it — no subdirectory is needed to reference or import the plugin.
 .
 ├── .github/workflows/   CI: build + test, and image build/push on tags
 ├── Dockerfile           Caddy image with the module baked in
+├── docs/                deployment guides (Docker, Cloudflare Tunnels)
 ├── LICENSE              Apache-2.0
 ├── go.mod / go.sum      module github.com/gmag11/caddy-cloudflare-dns-manager
 ├── *.go                 the plugin package (Caddy app, directives, reconcile)
 └── testenv/             local Docker harness for manual testing (not published)
 ```
+
+Guides:
+
+- [Deploying with Docker](docs/docker-deployment.md) — image, compose, volumes,
+  `cloudflared` sidecar, reload workflow.
+- [Configuring a Cloudflare Tunnel connection](docs/cloudflare-tunnel.md) —
+  step-by-step tunnel setup with the `tunnel` directive.
 
 ## Caddyfile
 

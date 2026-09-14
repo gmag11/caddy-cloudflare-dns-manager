@@ -89,6 +89,23 @@ func (m *mockCloudflare) handleZone(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Mirror Cloudflare's CNAME/address coexistence rejection (error 81054):
+		// a CNAME cannot be created where A/AAAA exist, and vice versa.
+		for i := range m.records {
+			if m.records[i].Name != rel {
+				continue
+			}
+			if isCNAMEClass(m.records[i].Type) != isCNAMEClass(rec.Type) {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"errors": []map[string]any{
+						{"code": 81054, "message": "A CNAME record with that host already exists."},
+					},
+				})
+				return
+			}
+		}
 		m.nextID++
 		rec.ID = fmt.Sprintf("rec-%d", m.nextID)
 		rec.Name = rel // store zone-relative internally
@@ -185,6 +202,12 @@ func (m *mockCloudflare) hasCall(s string) bool {
 		}
 	}
 	return false
+}
+
+// isCNAMEClass reports whether recType is a CNAME (as opposed to an address
+// record type), used to mirror Cloudflare's coexistence rule.
+func isCNAMEClass(recType string) bool {
+	return recType == "CNAME"
 }
 
 func (m *mockCloudflare) server(t *testing.T) *httptest.Server {

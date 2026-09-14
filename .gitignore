@@ -24,6 +24,10 @@ coverage.*
 .env.*
 !.env.example
 
+# cloudflared tunnel credentials and origin cert (testenv)
+testenv/tunnel/cert.pem
+testenv/tunnel/*.json
+
 # Editor/OS
 .idea/
 .vscode/

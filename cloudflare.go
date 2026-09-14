@@ -150,9 +150,10 @@ func (c *cloudflareClient) zoneIDByName(ctx context.Context, zone string) (strin
 	return "", fmt.Errorf("zone %q not found for this token", zone)
 }
 
-// listRecords lists the A and AAAA records in a zone. The Cloudflare API is
-// queried without a type filter (one paginated pass) and records of other
-// types are filtered out client-side.
+// listRecords lists the A, AAAA and CNAME records in a zone. The Cloudflare
+// API is queried without a type filter (one paginated pass) and records of
+// other types are filtered out client-side. CNAMEs are included so tunnel
+// hosts reconcile, adopt and prune them.
 func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cfDNSRecord, error) {
 	var records []cfDNSRecord
 	// Cloudflare paginates at 100; DNS record counts are small in practice,
@@ -168,7 +169,7 @@ func (c *cloudflareClient) listRecords(ctx context.Context, zoneID string) ([]cf
 			return nil, err
 		}
 		for _, r := range pageRecords {
-			if r.Type == "A" || r.Type == "AAAA" {
+			if r.Type == "A" || r.Type == "AAAA" || r.Type == "CNAME" {
 				records = append(records, r)
 			}
 		}

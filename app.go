@@ -88,6 +88,11 @@ type HostConfig struct {
 	Proxied *bool `json:"proxied,omitempty"`
 	// ForceAdopt allows adopting/updating an untagged existing record.
 	ForceAdopt bool `json:"force_adopt,omitempty"`
+	// TunnelID, when non-empty, declares this host as Cloudflare Tunnel-backed:
+	// the plugin reconciles a single proxied CNAME to
+	// <TunnelID>.cfargotunnel.com instead of A/AAAA records. Mutually
+	// exclusive with IP, IP6 and Proxied (enforced at adapt time).
+	TunnelID string `json:"tunnel,omitempty"`
 	// ZoneConfig is the resolved managed zone (filled at adapt time).
 	ZoneConfig ZoneConfig `json:"-"`
 }

@@ -48,19 +48,38 @@ By default, the plugin SHALL treat a Cloudflare A record that lacks the plugin's
 - **WHEN** the declaring site includes `force_adopt`
 - **THEN** the plugin updates the record to the configured state and rewrites its tag to this instance
 
+### Requirement: Record listing includes CNAME
+
+The plugin SHALL list CNAME records alongside A and AAAA records when enumerating a zone's DNS records, so tunnel CNAMEs participate in reconciliation, adoption, and prune.
+
+#### Scenario: CNAME visible to reconciliation
+
+- **WHEN** a zone contains a CNAME record at a managed host's name
+- **THEN** the record appears in the reconciliation map for that name with type CNAME
+
+#### Scenario: Non-address, non-CNAME types still filtered
+
+- **WHEN** a zone contains MX or TXT records
+- **THEN** they are filtered out and never reconciled or pruned
+
 ### Requirement: Per-family adoption
 
-Adoption of untagged records (including `force_adopt`) SHALL operate per record type: an untagged AAAA SHALL only be considered for adoption by the host's IPv6 management, and an untagged A only by the host's IPv4 management. The plugin SHALL NOT treat an untagged record of one family as adoptable because it manages the other family of the same name.
+The system SHALL apply ownership-based adoption per record type, where the record types considered are A, AAAA, and (for tunnel hosts) CNAME. An untagged record of any of these types at a managed name is never adopted via ownership of another type.
 
 #### Scenario: Untagged AAAA not adopted via A ownership
 
-- **WHEN** the plugin owns the A record of `foo.example.com`, an untagged AAAA exists for the same name, and the host declares `ip6 auto` without `force_adopt`
-- **THEN** the plugin leaves the untagged AAAA unchanged and logs that it is not owned
+- **WHEN** an owned A record exists for a name and an untagged AAAA also exists at that name
+- **THEN** the AAAA is not treated as owned
+
+#### Scenario: Untagged CNAME not adopted via A ownership
+
+- **WHEN** an owned A record exists for a normal host's name and an untagged CNAME also exists at that name
+- **THEN** the CNAME is not treated as owned
 
 #### Scenario: force_adopt applies per family
 
-- **WHEN** a host declares `ip6 2001:db8::10 force_adopt` and an untagged AAAA exists
-- **THEN** the plugin overwrites and claims the AAAA; any untagged A is unaffected by the IPv6 management
+- **WHEN** `force_adopt` is set on a host
+- **THEN** an untagged record of the managed type(s) for that host is adopted, and records of types the host does not manage are unaffected by adoption (tunnel hosts delete unmanaged owned/untagged address records per the tunnel migration rules)
 
 ### Requirement: Per-zone orphan prune
 
