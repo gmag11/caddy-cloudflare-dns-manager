@@ -54,10 +54,20 @@ directly to it — no subdirectory is needed to reference or import the plugin.
 
 Guides:
 
+- [Getting started](docs/getting-started.md) — token, build, minimal Caddyfile,
+  first reconcile. Start here.
 - [Deploying with Docker](docs/docker-deployment.md) — image, compose, volumes,
   `cloudflared` sidecar, reload workflow.
 - [Configuring a Cloudflare Tunnel connection](docs/cloudflare-tunnel.md) —
   step-by-step tunnel setup with the `tunnel` directive.
+- [Publishing addresses](docs/publishing-addresses.md) — direct IP, Tailscale,
+  IPv6, or tunnel: comparison and dual-family setups.
+- [Multiple servers, one zone](docs/multiple-servers.md) — instance ids,
+  ownership tags and prune across several Caddy servers.
+- [Troubleshooting](docs/troubleshooting.md) — symptom → cause → fix.
+- [Developing and testing locally](docs/contributing.md) — test layers, testenv,
+  PR checklist.
+- [Architecture](docs/architecture.md) — how the plugin works inside.
 
 ## Caddyfile
 
