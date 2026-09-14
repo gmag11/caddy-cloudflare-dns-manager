@@ -1,0 +1,79 @@
+services:
+  caddy:
+    build:
+      # Build context is the repo root so the Dockerfile can COPY go.mod,
+      # go.sum and the root-level plugin package. The plugin source is baked
+      # into the image at build time only; it is not mounted at runtime.
+      context: ..
+      dockerfile: testenv/Dockerfile
+      args:
+        CADDY_VERSION: "2.11.4"
+    image: caddy-cfdnsmanager-test:local
+    container_name: caddy-cfdnsmanager-test
+    env_file:
+      - .env
+    volumes:
+      # Only the Caddyfile is mounted, read-only. The plugin source is baked
+      # into the image and is not bind-mounted from the repo.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist ACME certificates/keys across restarts.
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    networks:
+      - default
+    restart: "no"
+
+  # cloudflared runs the locally-managed test tunnel. It connects outbound to
+  # Cloudflare's edge (no published ports) and forwards ingress-matching
+  # requests to http://caddy:80 inside the compose network. One-time setup
+  # (run from the repo root; the mount must be the tunnel dir, not the repo).
+  # cloudflared runs as the nonroot user (uid 65532) and resolves ~ via
+  # /etc/passwd, i.e. its home /home/nonroot — it does NOT honor $HOME or
+  # --user (uid 1000 has no passwd entry, so it cannot find ~/.cloudflared).
+  # Mount the tunnel dir at that home and make it writable by nonroot:
+  #   chmod 777 testenv/tunnel
+  #   docker run -it --rm -v "$PWD/testenv/tunnel:/home/nonroot/.cloudflared" \
+  #     cloudflare/cloudflared:latest tunnel login
+  #   docker run -v "$PWD/testenv/tunnel:/home/nonroot/.cloudflared" \
+  #     cloudflare/cloudflared:latest tunnel create cfdns-test
+  # That writes cert.pem and <TUNNEL-UUID>.json into testenv/tunnel/ (both
+  # gitignored). Put the tunnel UUID shown by `cloudflared tunnel list` (it is
+  # also the credentials filename) into CF_TUNNEL_ID in testenv/.env. At
+  # runtime the service mounts the same dir at /etc/cloudflared, reads the
+  # credentials via --cred-file and the ingress rules from config.yml.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cfdns-cloudflared-test
+    # Tunnel identity: UUID passed to `tunnel run` (and used to name the
+    # credentials file); ingress rules come from the mounted config.yml.
+    command: >
+      tunnel --no-autoupdate
+      --config /etc/cloudflared/config.yml
+      --cred-file /etc/cloudflared/${CF_TUNNEL_ID}.json
+      run ${CF_TUNNEL_ID}
+    env_file:
+      - .env
+    volumes:
+      - ./tunnel:/etc/cloudflared:ro
+    networks:
+      - default
+    restart: "no"
+    depends_on:
+      - caddy
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  # User-defined bridge with IPv6 enabled. The subnet is allocated from the
+  # daemon's default-address-pools (fd00::/56 -> fd00::/64); Docker NAT66s
+  # outbound traffic to the host's global IPv6. Enables `ip6 auto` detection
+  # inside the container.
+  default:
+    enable_ipv6: true
+

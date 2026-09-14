@@ -49,7 +49,7 @@ directly to it — no subdirectory is needed to reference or import the plugin.
 ├── LICENSE              Apache-2.0
 ├── go.mod / go.sum      module github.com/gmag11/caddy-cloudflare-dns-manager
 ├── *.go                 the plugin package (Caddy app, directives, reconcile)
-└── testenv/             local Docker harness for manual testing (not published)
+└── testenv/             Docker harness for manual/E2E testing
 ```
 
 Guides:

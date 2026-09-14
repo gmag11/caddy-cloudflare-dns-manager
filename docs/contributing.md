@@ -8,8 +8,7 @@ against a real Cloudflare zone, and how the pieces fit.
 ```
 *.go                plugin package (app, directives, reconcile, cloudflare client)
 *_test.go           unit + integration tests, in-package
-testenv/            Docker harness for manual/E2E testing (not published; locally
-                    excluded via .git/info/exclude)
+testenv/            Docker harness for manual/E2E testing
 openspec/           planning artifacts and the normative capability specs
 docs/               user guides
 ```

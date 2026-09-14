@@ -1,0 +1,27 @@
+# Ingress rules for the locally-managed test tunnel. The tunnel identity and
+# credentials path are passed on the command line by docker-compose.yml
+# (--cred-file <UUID>.json and the UUID argument to `tunnel run`); this file
+# carries only the ingress plan.
+#
+# NOTE: environment variables are NOT expanded in this file by cloudflared.
+# Keep the hostname in sync with CF_ZONE in the compose .env manually (this is
+# a test harness, so a single wildcard is enough).
+#
+# The hostname must match a host declared in the Caddyfile with
+# `cf_dns_manager { tunnel <uuid> }` so the plugin creates the CNAME.
+#
+# wildcard: set this to "*.<CF_ZONE>" (the same zone used in testenv/.env).
+ingress:
+  # Tunnel-backed test host. Traffic flow:
+  #   visitor -> CF edge (CNAME <tunnel-id>.cfargotunnel.com, created by the
+  #   plugin) -> cloudflared (this container) -> caddy:443.
+  #
+  # HTTPS origin + matchSNItoHost: cloudflared sends the request Host as SNI so
+  # Caddy serves the matching wildcard certificate. Pointing at http://caddy:80
+  # instead would loop (Caddy redirects HTTP to HTTPS).
+  - hostname: "*.example.com"
+    service: https://caddy:443
+    originRequest:
+      matchSNItoHost: true
+  # Required catch-all: anything unmatched returns 404.
+  - service: http_status:404

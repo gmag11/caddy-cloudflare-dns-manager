@@ -1,0 +1,75 @@
+{
+	# Admin API on localhost inside the container, so `caddy reload` works
+	# (e.g. docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile).
+	admin localhost:2019
+	log {
+		output stdout
+		format console
+	}
+
+	cf_dns_manager {
+		# Managed Cloudflare zone (apex) and its API token. `prune` opts in to
+		# deleting this instance's orphaned A records (tagged with our instance
+		# but no longer declared); untagged or other-instance records are never
+		# touched.
+		zone {$CF_ZONE} api_token {$CF_API_TOKEN} prune
+
+		# Optional: override the public IPv4 detection endpoint.
+		# ip_url https://ifconfig.me/ip
+
+		# Stable instance id so ownership tags survive container recreation.
+		# Without this it defaults to os.Hostname(), which in Docker is the
+		# container ID and changes on every recreate.
+		instance {$CF_INSTANCE}
+	}
+}
+
+# Wildcard site for the whole zone. The wildcard certificate is issued via the
+# ACME DNS-01 challenge using the Cloudflare provider.
+*.{$CF_ZONE} {
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+	}
+
+	@test1 host test1.{$CF_ZONE}
+	handle @test1 {
+		cf_dns_manager {
+			host @test1
+			#ip 100.64.10.5      # explicit override (e.g. Tailscale)
+			#ip6 auto
+			#proxied yes
+			#tunnel {$CF_TUNNEL_ID}
+			force_adopt
+		}
+		respond "test1.{$CF_ZONE} OK" 200
+	}
+
+	# Tunnel-backed host. The plugin reconciles a proxied CNAME to
+	# <CF_TUNNEL_ID>.cfargotunnel.com (no A/AAAA, no proxied/ip directives).
+	# force_adopt adopts the CNAME created manually by
+	# `cloudflared tunnel route dns`, if present. Traffic path: visitor ->
+	# CF edge -> cloudflared container -> caddy:443 (see tunnel/config.yml).
+	@git host git.{$CF_ZONE}
+	handle @git {
+		cf_dns_manager {
+			host @git
+			tunnel {$CF_TUNNEL_ID}
+			force_adopt
+		}
+		respond "git.{$CF_ZONE} OK (tunnel)" 200
+	}
+
+	# Second address host. Uncomment to publish another A record.
+	#@test2 host test2.{$CF_ZONE}
+	#handle @test2 {
+	#	cf_dns_manager {
+	#		host @test2
+	#		# Explicit override (e.g. Tailscale). A CGNAT/private IP always
+	#		# forces DNS-only, so `proxied` is ignored here.
+	#		ip 100.64.10.5
+	#		force_adopt
+	#		# proxied no
+	#	}
+	#	respond "test2.{$CF_ZONE} OK" 200
+	#}
+}
