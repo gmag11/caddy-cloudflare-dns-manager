@@ -66,7 +66,7 @@ coexist on the same Caddy: tunnel for `app.`, Tailscale for `admin.`:
 handle @admin {
 	cf_dns_manager {
 		host admin.example.com
-		ip 100.64.10.5      # Tailscale IPv4 (CGNAT → DNS-only)
+		ip 100.64.10.5         # Tailscale IPv4 (CGNAT → DNS-only)
 	}
 	reverse_proxy localhost:9090
 }

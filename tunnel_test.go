@@ -106,13 +106,13 @@ example.com {
 
 func TestIsUUID(t *testing.T) {
 	cases := map[string]bool{
-		testTunnelUUID:                          true,
-		"11111111-2222-3333-4444-555555555555":  true,
+		testTunnelUUID:                          true, // 11111111-2222-3333-4444-555555555555
+		"ABCDEF01-2345-6789-ABCD-EF0123456789":  true, // uppercase accepted
 		"not-a-uuid":                            false,
-		"11111111-2222-3333-4444-555555555555":      false,
-		"11111111-2222-3333-4444-555555555555":   false,
-		"11111111-2222-3333-4444-5555555555550": false,
-		"11111111-2222-3333-4444-555555555555":  false,
+		"11111111222233334444555555555555":      false, // no dashes
+		"11111111-2222-3333-4444-55555555555":   false, // too short
+		"11111111-2222-3333-4444-5555555555550": false, // too long
+		"g1111111-2222-3333-4444-555555555555":  false, // non-hex
 		"":                                      false,
 	}
 	for in, want := range cases {
@@ -173,7 +173,7 @@ func TestTunnelInSyncNoWrite(t *testing.T) {
 }
 
 func TestTunnelUpdatesOnDrift(t *testing.T) {
-	other := "11111111-2222-3333-4444-555555555555"
+	other := "99999999-8888-7777-6666-555555555555"
 	m := newMockCloudflare(t, "example.com", []cfDNSRecord{
 		{ID: "c1", Type: "CNAME", Name: "git", Content: other + ".cfargotunnel.com", TTL: 1, Proxied: true, Comment: "caddy-cf-dns:test-host"},
 	})
