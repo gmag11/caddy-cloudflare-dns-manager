@@ -109,6 +109,9 @@ func (app *App) detectPublicIPs(ctx context.Context, hosts []HostConfig) (ipv4, 
 		wantV6 bool
 	)
 	for _, hc := range hosts {
+		if hc.TunnelID != "" {
+			continue // tunnel hosts never need detection
+		}
 		if hc.IP == "" {
 			wantV4 = true
 		}
@@ -189,12 +192,6 @@ func (app *App) reconcileZone(
 	// whether a reconcile attempt succeeded: a family enabled in config but
 	// skipped by a transient detection failure stays managed and is spared.
 	managed := make(map[string]map[string]bool)
-	markManaged := func(key, recType string) {
-		if managed[key] == nil {
-			managed[key] = make(map[string]bool)
-		}
-		managed[key][recType] = true
-	}
 
 	tag := app.ownershipTag()
 
@@ -202,17 +199,45 @@ func (app *App) reconcileZone(
 		name := recordName(hc.Host, zone)
 		key := canonicalNameKey(name, zone)
 
+		// Tunnel hosts reconcile a single proxied CNAME and never touch
+		// detected IPs; address records at the name are cleared first (a
+		// CNAME cannot coexist with A/AAAA in Cloudflare).
+		if hc.TunnelID != "" {
+			var err error
+			records, err = app.reconcileTunnelHost(ctx, cli, zone, zoneID, hc, name, key, records, managed, tag)
+			if err != nil {
+				app.logger.Error("reconcile tunnel host failed",
+					zap.String("host", hc.Host), zap.String("zone", zone), zap.Error(err))
+			}
+			continue
+		}
+
+		// A normal host manages address records; a leftover owned CNAME from a
+		// previous tunnel declaration at the same name must be cleared first,
+		// because Cloudflare forbids a CNAME coexisting with A/AAAA. Without
+		// this, revert tunnel -> IP fails in the same reload (creation is
+		// rejected with code 81054) and prune only removes the CNAME
+		// afterwards, leaving the name with no record.
+		var clearErr error
+		records, clearErr = app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+			"address records", map[string]bool{"CNAME": true}, records, tag)
+		if clearErr != nil {
+			app.logger.Error("reconcile host failed",
+				zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "CNAME"), zap.Error(clearErr))
+			continue
+		}
+
 		// A is always managed for a declared host.
-		markManaged(key, "A")
+		markManaged(managed, key, "A")
 		ipv4, ipv4OK := resolveFamilyIP(hc.IP, det.ipv4, det.ipv4Failed)
-		if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "A", ipv4, ipv4OK, byName[key]["A"], tag); err != nil {
+		if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "A", ipv4, ipv4OK, byName[key]["A"], tag, effectiveProxied(hc, ipv4)); err != nil {
 			app.logger.Error("reconcile host failed",
 				zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "A"), zap.Error(err))
 		}
 
 		// AAAA is managed only when IPv6 is enabled in config.
 		if hc.IP6 != "" {
-			markManaged(key, "AAAA")
+			markManaged(managed, key, "AAAA")
 			literal := ""
 			if hc.IP6 != IP6Auto {
 				literal = hc.IP6
@@ -224,7 +249,7 @@ func (app *App) reconcileZone(
 					zap.String("ipv4", ipv4), zap.Bool("ipv4_proxied", !isPrivateIP(ipv4)),
 					zap.String("ipv6", ipv6), zap.Bool("ipv6_proxied", !isPrivateIP(ipv6)))
 			}
-			if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "AAAA", ipv6, ipv6OK, byName[key]["AAAA"], tag); err != nil {
+			if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "AAAA", ipv6, ipv6OK, byName[key]["AAAA"], tag, effectiveProxied(hc, ipv6)); err != nil {
 				app.logger.Error("reconcile host failed",
 					zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "AAAA"), zap.Error(err))
 			}
@@ -239,10 +264,116 @@ func (app *App) reconcileZone(
 	return nil
 }
 
+// markManaged records that the declared config asks the plugin to manage a
+// (name, record type) pair.
+func markManaged(managed map[string]map[string]bool, key, recType string) {
+	if managed[key] == nil {
+		managed[key] = make(map[string]bool)
+	}
+	managed[key][recType] = true
+}
+
+// reconcileTunnelHost reconciles a Cloudflare Tunnel host: it clears any
+// A/AAAA records at the name (Cloudflare forbids a CNAME coexisting with
+// address records) and reconciles a single proxied CNAME to
+// <tunnel-id>.cfargotunnel.com. It returns the records snapshot with deleted
+// entries removed so a later prune does not retry those deletions.
+func (app *App) reconcileTunnelHost(
+	ctx context.Context,
+	cli *cloudflareClient,
+	zone, zoneID string,
+	hc HostConfig,
+	name, key string,
+	records []cfDNSRecord,
+	managed map[string]map[string]bool,
+	tag string,
+) ([]cfDNSRecord, error) {
+	markManaged(managed, key, "CNAME")
+
+	// Clear address records that would block CNAME creation. Owned records are
+	// deleted unconditionally; untagged ones require force_adopt (adoption of
+	// the name), otherwise the CNAME cannot be created and the user is told.
+	kept, err := app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+		"tunnel CNAME", map[string]bool{"A": true, "AAAA": true}, records, tag)
+	if err != nil {
+		return kept, err
+	}
+
+	target := hc.TunnelID + ".cfargotunnel.com"
+	// Always proxied: a CNAME to cfargotunnel.com is not resolvable DNS-only.
+	// effectiveProxied must NOT be applied here (it would classify the
+	// hostname content as a private IP and force proxied=false).
+	var existing []cfDNSRecord
+	for i := range kept {
+		if kept[i].Type == "CNAME" && canonicalNameKey(kept[i].Name, zone) == key {
+			existing = append(existing, kept[i])
+		}
+	}
+	if err := app.reconcileFamily(ctx, cli, zone, zoneID, hc, name, "CNAME", target, true, existing, tag, true); err != nil {
+		return kept, err
+	}
+	return kept, nil
+}
+
+// clearConflictingRecords deletes records at a host's name whose type is in
+// blockingTypes, which would otherwise make the desired record type
+// uncreatable (Cloudflare forbids a CNAME coexisting with A/AAAA). Owned
+// records are deleted unconditionally; untagged ones are only deleted when
+// force_adopt is set, otherwise an error is returned (and the named records
+// are left untouched). desiredType only labels log messages. It returns the
+// records snapshot with deleted entries removed so a later prune does not
+// retry those deletions.
+func (app *App) clearConflictingRecords(
+	ctx context.Context,
+	cli *cloudflareClient,
+	hc HostConfig,
+	zone, zoneID, name, key string,
+	desiredType string,
+	blockingTypes map[string]bool,
+	records []cfDNSRecord,
+	tag string,
+) ([]cfDNSRecord, error) {
+	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone))
+
+	kept := make([]cfDNSRecord, 0, len(records))
+	var blocked error
+	for i := range records {
+		r := &records[i]
+		if !blockingTypes[r.Type] || canonicalNameKey(r.Name, zone) != key {
+			kept = append(kept, *r)
+			continue
+		}
+		owned := isOwnedByInstance(r.Comment, tag)
+		if !owned && !hc.ForceAdopt {
+			log.Error("host name has an untagged record that blocks the desired type; a CNAME cannot coexist with A/AAAA",
+				zap.String("record_id", r.ID), zap.String("record_type", r.Type),
+				zap.String("content", r.Content), zap.String("desired", desiredType),
+				zap.String("remedy", "remove the record or add force_adopt"))
+			blocked = fmt.Errorf("untagged %s record %s at %s blocks %s", r.Type, r.ID, name, desiredType)
+			kept = append(kept, *r)
+			continue
+		}
+		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
+			log.Error("could not delete conflicting record",
+				zap.String("record_id", r.ID), zap.String("record_type", r.Type),
+				zap.String("desired", desiredType), zap.Error(err))
+			blocked = fmt.Errorf("deleting %s record %s at %s: %w", r.Type, r.ID, name, err)
+			kept = append(kept, *r)
+			continue
+		}
+		log.Info("deleted conflicting record to make room for the desired type",
+			zap.String("record_id", r.ID), zap.String("record_type", r.Type),
+			zap.String("content", r.Content), zap.String("desired", desiredType),
+			zap.String("fqdn", hc.Host))
+	}
+	return kept, blocked
+}
+
 // reconcileFamily handles a single (host, record type) pair against its
-// existing records of that type. available reports whether an effective IP was
-// resolved; when false the family is skipped with a warning and existing
-// records are left unchanged.
+// existing records of that type. available reports whether an effective value
+// was resolved; when false the family is skipped with a warning and existing
+// records are left unchanged. proxied is the desired proxy mode, computed by
+// the caller: address records use effectiveProxied, tunnel CNAMEs always true.
 func (app *App) reconcileFamily(
 	ctx context.Context,
 	cli *cloudflareClient,
@@ -252,6 +383,7 @@ func (app *App) reconcileFamily(
 	available bool,
 	existing []cfDNSRecord,
 	tag string,
+	proxied bool,
 ) error {
 	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", recType))
 
@@ -267,8 +399,6 @@ func (app *App) reconcileFamily(
 		log.Warn("no effective IP for host; skipping")
 		return nil
 	}
-
-	proxied := effectiveProxied(hc, ip)
 
 	// Find an existing record of this type owned by this instance for this
 	// name. Matching is strictly per type: an untagged record of the other

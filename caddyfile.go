@@ -187,6 +187,7 @@ var _ caddyhttp.MiddlewareHandler = (*hostHandler)(nil)
 func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 	var hc HostConfig
 	hc.Proxied = boolPtr(true) // default proxied
+	proxiedSet := false
 
 	for h.NextBlock(0) {
 		switch d := h.Val(); d {
@@ -242,6 +243,7 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 			default:
 				return hc, h.Errf("proxied must be yes or no, got %q", h.Val())
 			}
+			proxiedSet = true
 			if h.NextArg() {
 				return hc, h.ArgErr()
 			}
@@ -250,6 +252,21 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 				return hc, h.ArgErr()
 			}
 			hc.ForceAdopt = true
+		case "tunnel":
+			if hc.TunnelID != "" {
+				return hc, h.Errf("tunnel specified more than once")
+			}
+			if !h.NextArg() {
+				return hc, h.ArgErr()
+			}
+			id := strings.ToLower(h.Val())
+			if !isUUID(id) {
+				return hc, h.Errf("tunnel must be a UUID, got %q", h.Val())
+			}
+			hc.TunnelID = id
+			if h.NextArg() {
+				return hc, h.ArgErr()
+			}
 		default:
 			return hc, h.Errf("unrecognized subdirective: %s", d)
 		}
@@ -259,7 +276,53 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 		return hc, h.Errf("cf_dns_manager requires a host subdirective")
 	}
 
+	if hc.TunnelID != "" {
+		// A tunnel host has no IP plan and its CNAME must always be proxied.
+		if hc.IP != "" {
+			return hc, h.Errf("tunnel cannot be combined with ip; a tunnel host routes via CNAME, not an address")
+		}
+		if hc.IP6 != "" {
+			return hc, h.Errf("tunnel cannot be combined with ip6; a tunnel host routes via CNAME, not an address")
+		}
+		if proxiedSet {
+			return hc, h.Errf("tunnel cannot be combined with proxied; a tunnel CNAME is always proxied")
+		}
+	}
+
 	return hc, nil
+}
+
+// isUUID reports whether s is a canonical 8-4-4-4-12 hexadecimal UUID
+// (case-insensitive; callers normalize to lower case before storing).
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !isHexDigit(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHexDigit(r rune) bool {
+	switch {
+	case r >= '0' && r <= '9':
+		return true
+	case r >= 'a' && r <= 'f':
+		return true
+	case r >= 'A' && r <= 'F':
+		return true
+	}
+	return false
 }
 
 // resolveHostToken resolves a host argument that is either a literal FQDN or
