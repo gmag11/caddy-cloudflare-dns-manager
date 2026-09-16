@@ -3,7 +3,6 @@
 ## Purpose
 
 Defines how the plugin manages Cloudflare Tunnel ingress for tunnel-backed hosts: the optional account-scoped credential and derivation of the account id from the managed zone, the ingress plan derivation (per-host rules, deterministic ordering, configurable default route, mandatory catch-all), read-modify-write reconciliation against the Tunnel configuration API, preservation of foreign rules, the no-deletion rule for undeclared rules, remotely-managed-only enforcement, and idempotent writes.
-
 ## Requirements
 ### Requirement: Account-scoped tunnel credential
 
@@ -58,45 +57,23 @@ The global `cf_dns_manager` block SHALL accept an optional `tunnel_default_servi
 - **WHEN** `tunnel_default_service` is declared with a value that is neither a supported service URL nor an `http_status:<code>` service
 - **THEN** the adapter rejects the config with an error naming the invalid value
 
-### Requirement: Rules carry the instance ownership tag
-
-Every ingress rule the plugin authors SHALL carry the instance ownership tag in its `description`, the ingress counterpart of the comment written on DNS records. The tag SHALL be corrected on drift, so a rule that lost or changed its tag is rewritten. The plugin SHALL NOT delete any rule on the basis of its description, because a description is user-editable and therefore not proof of authorship.
-
-#### Scenario: Derived rules are tagged
-
-- **WHEN** the plugin writes a plan for a tunnel
-- **THEN** every rule it authors, including the catch-all, carries the instance ownership tag as its description
-
-#### Scenario: A missing or changed tag is drift
-
-- **WHEN** a declared host's rule exists with the right service but no tag, or a different description
-- **THEN** the configuration is rewritten so the rule carries the instance tag
-
-#### Scenario: Tag in place is not drift
-
-- **WHEN** a declared host's rule already carries the right service and the instance tag
-- **THEN** no write is issued for that configuration
-
-#### Scenario: Tag is never the basis for deletion
-
-- **WHEN** a rule is not declared by the configuration, whatever its description says
-- **THEN** it is preserved and never deleted
-
 ### Requirement: Unmanaged rule metadata is preserved
 
-Ingress rules carry fields the plugin does not manage, notably a `path` and an `originRequest`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
+Ingress rules carry fields the plugin does not manage, notably a `path` and origin-request options other than `matchSNItoHost`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
 
-Preserving `originRequest` is load-bearing rather than cosmetic: an option such as `matchSNItoHost` cannot be expressed by the plugin, and losing it makes `cloudflared` present the service URL's hostname as SNI, which a wildcard-certificate origin rejects, turning every request into a 502.
+`matchSNItoHost` is excluded from this inheritance because the plugin authors it: for an HTTPS service it is always enabled, so it is re-asserted from the service rather than inherited.
+
+The `description` field is not modelled at all. It is absent from Cloudflare's documented ingress model and the dashboard never sets it, while a write that omits the key clears any stored value. The plugin therefore does not participate in the field.
 
 #### Scenario: Foreign rule keeps its metadata
 
-- **WHEN** an undeclared rule carries a description and an origin request, and the plugin writes the configuration
-- **THEN** both are present and unchanged in the written configuration
+- **WHEN** an undeclared rule carries a path or an origin-request option such as `http2Origin`, and the plugin writes the configuration
+- **THEN** they are present and unchanged in the written configuration
 
-#### Scenario: Rewritten rule keeps its origin request
+#### Scenario: Rewritten rule keeps its origin-request options
 
-- **WHEN** a declared host's rule has a stale service and an `originRequest` such as `matchSNItoHost`
-- **THEN** the written rule carries the corrected service, the instance tag, and the original `originRequest`
+- **WHEN** a declared host's rule has a stale service and an `originRequest` carrying options other than the managed one
+- **THEN** the written rule carries the corrected service and the original options
 
 #### Scenario: Rewritten rule keeps its path
 
@@ -105,18 +82,18 @@ Preserving `originRequest` is load-bearing rather than cosmetic: an option such 
 
 #### Scenario: Catch-all metadata preserved
 
-- **WHEN** the existing catch-all carries an origin request and the plugin re-emits the default rule
-- **THEN** it is carried over to the emitted catch-all
+- **WHEN** the existing catch-all carries an origin-request option and the plugin re-emits the default rule
+- **THEN** the option is carried over to the emitted catch-all
 
-#### Scenario: A preserved field alone is not drift
+#### Scenario: An unmanaged field alone is not drift
 
-- **WHEN** the only difference between the stored configuration and the derived plan is a `path` or an `originRequest`
+- **WHEN** the only difference between the stored configuration and the derived plan is an unmanaged field
 - **THEN** no write is issued and the field is left intact
 
-#### Scenario: Metadata is never invented
+#### Scenario: Descriptions are not managed
 
-- **WHEN** a declared host has no existing rule to inherit from
-- **THEN** its derived rule is written with the instance tag and no path or origin request
+- **WHEN** the plugin writes a rule
+- **THEN** it does not set or preserve a `description`, because the field is outside Cloudflare's documented model and the dashboard never populates it
 
 ### Requirement: Ingress plan derivation
 
@@ -224,17 +201,27 @@ The plugin SHALL manage ingress only for tunnels whose configuration source is r
 
 ### Requirement: Undeclared ingress rules are not deleted
 
-Rules removed from the configuration SHALL NOT be deleted from the tunnel. Because ingress rules carry no ownership marker, an undeclared rule cannot be distinguished from a hand-made one, so the plugin SHALL NOT delete it. The DNS record no longer resolving is what makes the leftover rule inert.
+Rules removed from the configuration SHALL NOT be deleted from the tunnel, except when the owning zone has declared `prune` AND the route's hostname is one whose DNS record this plugin deleted during the same reconcile, as specified by the `tunnel-ingress-prune` capability. When any of those conditions fails, the rule SHALL be preserved. The plugin SHALL NOT delete a rule on the basis of its `description` or of any inferred property.
 
-#### Scenario: Removed host rule left in place
+#### Scenario: Removed host rule left in place without the opt-in
 
-- **WHEN** a host that previously declared `tunnel <uuid>` is removed from the config
+- **WHEN** a host that previously declared `tunnel <uuid>` is removed from the config and the owning zone has not declared `prune`
 - **THEN** its ingress rule remains on the tunnel and the plugin logs that manual removal is required
 
-#### Scenario: Never delete an undeclared rule
+#### Scenario: Route whose DNS record survived is preserved
 
-- **WHEN** the plugin reconciles a tunnel whose configuration contains a rule not derivable from the declared config
-- **THEN** no delete request targets that rule
+- **WHEN** an undeclared route's hostname still has a DNS record, so no deletion occurred for it in this run
+- **THEN** the rule is preserved
+
+#### Scenario: Eligible route pruned under the opt-in
+
+- **WHEN** the owning zone declared `prune`, the route's hostname is undeclared, and this run's DNS prune deleted the record for that hostname
+- **THEN** the route is removed from the configuration in the same write as the derived plan
+
+#### Scenario: Description is never a deletion signal
+
+- **WHEN** an undeclared rule carries any `description`, including one resembling an ownership marker
+- **THEN** the description does not affect eligibility
 
 ### Requirement: Ingress failures do not block DNS reconciliation
 
@@ -249,4 +236,38 @@ A failure to reconcile tunnel ingress SHALL NOT prevent DNS record reconciliatio
 
 - **WHEN** a zone's DNS reconciliation fails
 - **THEN** ingress reconciliation for tunnels in other zones still proceeds
+
+### Requirement: HTTPS origins carry matchSNItoHost
+
+Every ingress rule the plugin writes whose service uses the `https://` scheme SHALL carry `originRequest.matchSNItoHost` set to true, including the catch-all rule. The plugin SHALL merge this option into any existing origin request rather than replacing it, so other options the operator set are preserved. A rule whose service is `https://` and which lacks the option SHALL be treated as drift and corrected. Rules whose service uses any other scheme SHALL be left without it.
+
+#### Scenario: Derived HTTPS rule carries the option
+
+- **WHEN** the plugin writes a rule for a host whose tunnel service is `https://caddy:443`
+- **THEN** the rule's origin request has `matchSNItoHost` set to true
+
+#### Scenario: Catch-all carries it too
+
+- **WHEN** `tunnel_default_service` is an `https://` service
+- **THEN** the catch-all rule the plugin emits also carries `matchSNItoHost`
+
+#### Scenario: Other options are preserved
+
+- **WHEN** a rule already carries `originRequest` with options such as `http2Origin`, and the plugin adds the managed option
+- **THEN** those options are present in the written rule alongside `matchSNItoHost`
+
+#### Scenario: A missing option is drift
+
+- **WHEN** a declared host's HTTPS rule exists without `matchSNItoHost`
+- **THEN** the configuration is rewritten so the option is set
+
+#### Scenario: A rule that already has it is not drift
+
+- **WHEN** a declared host's HTTPS rule already enables `matchSNItoHost`
+- **THEN** no write is issued for that configuration
+
+#### Scenario: Non-HTTPS services are left alone
+
+- **WHEN** a rule's service uses `http://`, `http_status:`, or a non-HTTP scheme
+- **THEN** the plugin does not add `matchSNItoHost` to it
 
