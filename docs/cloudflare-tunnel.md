@@ -212,8 +212,12 @@ halves automatically.
 - Without it, the plugin reconciles DNS only and logs that ingress management
   needs the credential. Nothing else changes.
 - `tunnel_default_service <service>` accepts the same service values as
-  `tunnel_service`: `http`, `https`, `unix`, `unix+tls`, `tcp`, `ssh`, `rdp`,
-  `smb` URLs, or `http_status:<code>`.
+  `tunnel_service`: `http`, `https`, `tcp`, `ssh`, `rdp` and `smb` URLs,
+  `unix`/`unix+tls` socket paths, or `http_status:<code>`.
+- Unix sockets are written as a path, not a URL: both `unix:/run/app.sock`
+  (the spelling used in Cloudflare's own examples) and `unix:///run/app.sock`
+  are accepted, because `cloudflared` trims the prefix and uses whatever
+  follows as the filesystem path. `unix+tls:` speaks TLS over the socket.
 - The default is written as the tunnel's **final catch-all rule**. Because it
   has no hostname, it creates no DNS record — that is what keeps undeclared
   subdomains unresolvable.

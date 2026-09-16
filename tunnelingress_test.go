@@ -1363,8 +1363,13 @@ example.com {
 func TestParseTunnelServiceValidation(t *testing.T) {
 	valid := []string{
 		"https://caddy:443", "http://caddy:80", "ssh://caddy:22", "tcp://1.2.3.4:5432",
-		"unix:///tmp/sock", "unix+tls:///tmp/sock", "rdp://host:3389", "smb://host:445",
+		"rdp://host:3389", "smb://host:445",
 		"http_status:404", "http_status:200",
+		// Unix sockets: cloudflared trims the prefix and uses the rest as a
+		// path, so the slashes are not significant. Both the spelling in
+		// Cloudflare's own examples and the URL-looking one must be accepted.
+		"unix:/tmp/sock", "unix:///tmp/sock", "unix://tmp/sock",
+		"unix+tls:/tmp/sock", "unix+tls:///tmp/sock", "unix+tls://tmp/sock",
 	}
 	for _, v := range valid {
 		if err := parseTunnelService(v); err != nil {
@@ -1374,6 +1379,8 @@ func TestParseTunnelServiceValidation(t *testing.T) {
 
 	invalid := []string{
 		"", "caddy:443", "ftp://caddy:21", "https://", "http_status:40", "http_status:abcd",
+		// A socket prefix with no path behind it is not a destination.
+		"unix:", "unix://", "unix+tls:", "unix+tls://",
 	}
 	for _, v := range invalid {
 		if err := parseTunnelService(v); err == nil {

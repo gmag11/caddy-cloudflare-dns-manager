@@ -349,15 +349,27 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 	return hc, nil
 }
 
-// tunnelServiceSchemes are the service URL schemes Cloudflare Tunnel accepts.
+// tunnelServiceSchemes are the network service URL schemes Cloudflare Tunnel
+// accepts.
 var tunnelServiceSchemes = []string{
-	"http://", "https://", "unix://", "unix+tls://", "tcp://", "ssh://", "rdp://", "smb://",
+	"http://", "https://", "tcp://", "ssh://", "rdp://", "smb://",
 }
 
-// parseTunnelService validates a tunnel ingress service value: either a
-// supported service URL with a non-empty address, or "http_status:<code>".
-// Validation is syntactic only; the API and cloudflared remain the authority
-// on whether a destination is actually reachable.
+// tunnelSocketSchemes are the unix-socket service prefixes. cloudflared parses
+// these by trimming the prefix and treating the remainder as a filesystem path
+// — it never parses them as URLs — so the slashes after the colon carry no
+// meaning and only the path matters. Every spelling Cloudflare's documentation
+// and cloudflared itself accept is therefore allowed: "unix:/run/x.sock" (as
+// written in Cloudflare's own examples) and "unix:///run/x.sock" alike.
+var tunnelSocketSchemes = []string{
+	"unix+tls:", "unix:",
+}
+
+// parseTunnelService validates a tunnel ingress service value: a supported
+// service URL with a non-empty address, a unix-socket service with a non-empty
+// path, or "http_status:<code>". Validation is syntactic only; the API and
+// cloudflared remain the authority on whether a destination is actually
+// reachable.
 func parseTunnelService(val string) error {
 	if val == "" {
 		return fmt.Errorf("service cannot be empty")
@@ -374,6 +386,16 @@ func parseTunnelService(val string) error {
 		}
 		return nil
 	}
+	for _, scheme := range tunnelSocketSchemes {
+		if strings.HasPrefix(val, scheme) {
+			// Only the path matters, so drop every leading slash before asking
+			// whether one was given: "unix://" carries no path at all.
+			if strings.TrimLeft(strings.TrimPrefix(val, scheme), "/") == "" {
+				return fmt.Errorf("service %q has no socket path", val)
+			}
+			return nil
+		}
+	}
 	for _, scheme := range tunnelServiceSchemes {
 		if strings.HasPrefix(val, scheme) {
 			if strings.TrimPrefix(val, scheme) == "" {
@@ -382,8 +404,8 @@ func parseTunnelService(val string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("unsupported service %q; expected one of %s or http_status:<code>",
-		val, strings.Join(tunnelServiceSchemes, ", "))
+	return fmt.Errorf("unsupported service %q; expected one of %s, %s or http_status:<code>",
+		val, strings.Join(tunnelServiceSchemes, ", "), strings.Join(tunnelSocketSchemes, ", "))
 }
 
 // isUUID reports whether s is a canonical 8-4-4-4-12 hexadecimal UUID
