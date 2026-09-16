@@ -14,8 +14,3 @@
 
 - [x] 3.1 Add a validator case for `tunnel_service` alongside the existing `tunnel_default_service` one, so the per-host path is exercised by the same accepted-set rule
 - [x] 3.2 Confirm `matchSNItoHost` is not applied to a `unix+tls:` service, matching the "A TLS socket is left alone" scenario, and that the reasoning is recorded where a reader would look
-
-## 4. Sync the specification
-
-- [x] 4.1 Validate the change with `openspec validate specify-tunnel-service-values --strict`
-- [ ] 4.2 Archive the change so the accepted set, the socket-path rule and the two exclusions land in `openspec/specs/tunnel-ingress-management/spec.md`
