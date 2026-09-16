@@ -215,10 +215,11 @@ carrying `tunnel_default_service`. Because that default is an ingress rule and
 not a DNS record, **no `*.<zone>` DNS record is needed** — undeclared subdomains
 simply do not resolve.
 
-Each written rule carries the instance ownership tag in its **Description**
-field, the same `<tag_prefix>:<instance>` marker used on DNS records, so you can
-tell which Caddy instance authored a route. The tag is informational: the plugin
-never deletes ingress rules, since a description is user-editable.
+Route cleanup follows the DNS record: in a `prune`-enabled zone, deleting the
+record that made a hostname reachable also deletes that hostname's route in the
+same reload. A route whose record still exists is never touched, and removing
+the last tunnel host of a config leaves its route behind with a log line asking
+for manual cleanup.
 
 | Subdirective | Description |
 | --- | --- |

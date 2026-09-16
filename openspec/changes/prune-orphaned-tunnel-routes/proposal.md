@@ -2,36 +2,37 @@
 
 ## Why
 
-The plugin writes an instance tag into every ingress rule it authors, but never deletes a rule: removing a host from the Caddyfile leaves its route on the tunnel forever, and the Routes list in the dashboard silently accumulates dead entries. DNS records already solve this — `prune` deletes owned records whose name is no longer declared — and the tag now exists on ingress rules too, so the same cleanup is possible.
+The plugin writes a route for every tunnel-backed host, but never removes one: deleting a host from the Caddyfile prunes its DNS record and leaves its route on the tunnel forever, so the Routes list accumulates entries that can only be cleaned up by hand.
+
+A first attempt keyed cleanup off an ownership marker written into the rule's `description`. That is not viable: `description` is absent from Cloudflare's documented ingress model, the dashboard does not display it, and — verified live — the dashboard **clears it** whenever a rule is edited there. Any scheme built on it would silently stop working the first time someone touched a route in the UI.
+
+The DNS side already has the answer. When `prune` deletes a CNAME that pointed at the tunnel, the plugin has just removed the only thing making that hostname reachable. The corresponding route is provably dead at that exact moment — no inference, no marker needed.
 
 ## What Changes
 
-- Prune the tunnel's ingress rules on reconcile, gated on the zone-style opt-in: rules are deleted only when the operator has asked for it **and** the rule is unambiguously dead.
-- A rule is a prune candidate only when **all** of these hold:
-  - its `description` equals this instance's ownership tag;
-  - its hostname is not declared by this configuration;
-  - the hostname does not resolve (no DNS record at that name).
-- The third condition is what makes this safe to ship. The plugin owns both halves of a tunnel host — the CNAME and the ingress rule — so it can prove a route is unreachable rather than assume it. A route whose DNS record still exists is never deleted, whatever its tag says.
-- Prune never deletes the last rule: the mandatory catch-all is always re-emitted by the reconciler, so the configuration can never become invalid.
-- **BREAKING** for the tag's meaning only: `description` becomes actionable for deletion under those conditions. It is still never trusted on its own.
-- Document the opt-in, the three conditions, and how to audit what was deleted.
+- **Remove** the ownership-tag mechanism from ingress rules: stop writing `description`, stop treating it as drift, and inherit it from the operator like any other unmanaged field.
+- Prune a tunnel route when **this run's DNS prune deleted the record that made its hostname reachable**. The route deletion and the DNS deletion happen in one reconcile.
+- A route is never pruned for any other reason: an undeclared route whose DNS record still exists is preserved, however stale it looks.
+- A declared host's route is never a prune candidate, even if its DNS record changed type in the same run.
+- The catch-all is never removed; the reconciler always re-emits it, so a written configuration stays valid.
+- Prune runs under the existing per-zone `prune` opt-in — no new directive.
+- Prune only reaches tunnels the configuration declares. When the last host of a tunnel is removed, prune drops its DNS record but cannot know which tunnel the route belonged to; it reports that rather than enumerating the account's tunnels.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `tunnel-ingress-prune`: The opt-in and its scope, the three-condition eligibility rule, the DNS-liveness precondition and why it is required, the catch-all exemption, logging and auditability of deletions, and the interaction with the existing no-delete default.
+- `tunnel-ingress-prune`: The opt-in, the DNS-correlation rule that makes a route eligible, what is never eligible (declared hosts, the catch-all, routes of undeclared tunnels), single-write behaviour, and the audit logging of deletions.
 
 ### Modified Capabilities
 
-- `tunnel-ingress-management`: The requirement "Undeclared ingress rules are not deleted" changes from an unconditional guarantee to a conditional one: rules are preserved unless the operator opted into prune and the eligibility conditions hold. The ownership-tag requirement gains the tag's role in eligibility. All other requirements are unchanged.
-- `record-ownership`: The `prune` opt-in is currently zone-scoped and described as covering DNS records. Its scope is clarified to cover this instance's orphaned artifacts in that zone's tunnels as well.
+- `tunnel-ingress-management`: The "Undeclared ingress rules are not deleted" requirement becomes conditional on the DNS-correlation rule. The requirement that rules carry an ownership tag is **removed** — the mechanism is being reverted — and `description` returns to being an unmanaged field preserved like `path` and `originRequest`.
+- `record-ownership`: The `prune` opt-in's scope is clarified: it covers this instance's orphaned artifacts in that zone, and for tunnel routes it additionally requires the DNS record to have been deleted in the same run.
 
 ## Impact
 
-- **Code**: a prune pass in the ingress module (`tunnelingress.go`), invoked from the tunnel reconcile after the plan write; it needs the set of resolving names, which the DNS phase already computes, so the zone reconciliation must surface the names it left in place (or the ingress pass re-reads them).
-- **Config**: reuses the existing per-zone `prune` flag. No new directive is introduced.
-- **Safety model**: the first destructive path in the ingress code, so it ships with a conservative precondition (DNS-liveness) rather than mirroring DNS prune exactly.
-- **Tests**: eligibility unit tests for each condition and each combination; a test that a rule with a live DNS record is never deleted; a catch-all exemption test; an opt-out no-op test; an audit-log test.
-- **Docs**: `docs/cloudflare-tunnel.md` (prune section), `docs/troubleshooting.md` (recovering a wrongly pruned route), `docs/architecture.md` (the prune pass and why the liveness precondition exists).
-- **Not included**: pruning rules that have no tag (they cannot be attributed), pruning across zones, or reconciling routes for tunnels that are not declared.
+- **Code**: `tunnelingress.go` (drop the tag from the plan, drift and derive signature; `mergeIngressPlan` gains the pruned-name set and reports what it dropped), `reconcile.go` (`pruneZone` returns the hostnames it deleted, `reconcileZone` propagates them, the ingress phase applies them).
+- **Removed**: the `description` write path and its drift check. Rules tagged by an earlier build keep their tag until a rewrite, at which point the field is inherited like any other unmanaged field; nothing is actively cleaned up and nothing breaks.
+- **Tests**: the tag-semantics tests are replaced by DNS-correlation tests, including the negative cases (nothing pruned → nothing deleted, declared host → never deleted, catch-all → never removed).
+- **Docs**: `docs/cloudflare-tunnel.md`, `docs/troubleshooting.md`, `docs/architecture.md`, `README.md`.
+- **Not included**: pruning routes for tunnels the config no longer declares; pruning on any signal other than a DNS deletion in the same run.

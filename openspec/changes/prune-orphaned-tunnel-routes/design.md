@@ -2,111 +2,109 @@
 
 ## Context
 
-The plugin manages both halves of a tunnel host: a DNS CNAME and an ingress rule. DNS has had an ownership model and a prune pass for a while — `pruneZone` deletes records tagged with this instance whose `(name, type)` is no longer declared. Ingress rules gained the same tag in `add-tunnel-ingress-management` (`description = <tag_prefix>:<instance>`), but deletion was explicitly excluded from that change: the tag is user-editable, so it is not proof of authorship, and "delete everything undeclared" would destroy hand-made configuration on the first run.
+A tunnel host has two halves: a DNS record and an ingress route. Removing the host from the Caddyfile prunes the record (in a `prune`-enabled zone) and leaves the route, so routes accumulate and only a human can clear them.
 
-That leaves a real gap. A host removed from the Caddyfile keeps its route on the tunnel indefinitely, and the Routes list accumulates entries nobody can attribute. The tag exists; nothing acts on it.
+The first design for this keyed cleanup off an ownership tag written into the route's `description`, mirroring the DNS comment. Two discoveries killed it:
 
-Verified facts this design rests on:
+- `description` is **not in Cloudflare's documented ingress model** (`ingress[]: { hostname, service, originRequest, path }`), and the dashboard does not render the column.
+- Verified live: **editing a route in the dashboard clears its description.** A tagged route came back untagged after a UI edit, while untouched routes kept theirs.
 
-- `PUT .../configurations` accepts and persists `description`, but the field is **absent from the API's documented model** (`ingress[]: { hostname, service, originRequest, path }`) and the dashboard's Routes table does **not** render it (the column shows "-"). So the tag is invisible in the UI.
-- The dashboard does expose the route's service and its "Additional settings" state, which is enough to identify a suspicious entry but not to confirm authorship.
-- The plugin already reads every DNS record in a zone during reconciliation, so knowing whether a hostname resolves costs no extra API call.
+So the marker is invisible, undocumented, and erased by normal use. Keying destructive behaviour off it would produce a prune that silently stops working — and, worse, one whose decisions could not be audited.
+
+The replacement needs no marker at all. `pruneZone` deletes a record because this instance owns it and the config no longer declares its host. When that record was the CNAME pointing at the tunnel, the route's hostname stops resolving at that moment. The route is not *presumed* dead; it is made dead by an action the plugin just took.
 
 Relevant existing code:
 
-- `pruneZone` (`reconcile.go`) — the DNS prune pass and the ownership test it relies on.
-- `mergeIngressPlan` / `inheritUnmanagedFields` (`tunnelingress.go`) — where foreign rules are preserved today.
-- `reconcileIngressPhase` (`reconcile.go`) — the phase that would host the prune pass.
+- `pruneZone` (`reconcile.go`) — deletes owned orphaned records; now also reports which hostnames it deleted.
+- `reconcileZone` (`reconcile.go`) — returns a `reconcileZoneResult` carrying the account id and the pruned hostnames.
+- `mergeIngressPlan` / `inheritedUnmanagedFields` (`tunnelingress.go`) — where foreign rules are preserved and metadata is carried over.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Let an operator clean up dead routes automatically, without hand-deleting entries in a UI that cannot show who made them.
-- Make every deletion **provable** rather than presumed: never delete a route that can still receive traffic.
-- Keep the default posture unchanged: with no opt-in, nothing is ever deleted.
+- Clean up routes whose DNS record this plugin just pruned, in the same reconcile.
+- Never delete a route on the basis of a marker the operator cannot see.
+- Keep the default posture: no opt-in, no deletions.
 
 **Non-Goals:**
 
-- Pruning rules with no tag, or with another instance's tag.
-- Making the tag authoritative on its own.
-- Pruning across zones, or for tunnels this config does not declare.
-- Fixing the dashboard's failure to display `description` (not in our control).
+- Pruning routes for tunnels the configuration no longer declares (see D4).
+- Any signal other than a DNS deletion performed in the same run.
+- Replacing the tag mechanism with another tag mechanism.
 
 ## Decisions
 
-### D1: Opt-in per zone, reusing the existing `prune` flag
+### D1: Eligibility is a DNS event, not an inferred property
 
-Eligibility to prune requires the zone that owns the hostname to have declared `prune`. No new directive is introduced: the operator already opted into "this plugin may clean up my orphans here", and adding a second switch for the same intent invites the two to disagree.
-
-*Rationale*: a separate flag would need its own documentation, its own failure mode (set one, not the other), and would not add safety — the destructive precondition is D2, not the switch.
-
-*Alternative rejected*: always-on pruning of provably dead rules. Even a provably dead route may be documentation of intent, and deletion should stay something the operator asked for.
-
-### D2: Three conditions, of which DNS-liveness is the load-bearing one
-
-A rule is deleted only when all hold:
+A route is deleted only when its hostname is in the set of names `pruneZone` deleted during this same run, and the route is not declared by the configuration.
 
 ```
-1. description == this instance's tag        (attribution)
-2. hostname not declared by this config      (orphanhood)
-3. hostname resolves to no DNS record        (liveness)
+DNS phase                          ingress phase
+─────────                          ─────────────
+pruneZone deletes                  route for that hostname?
+  CNAME foo → tunnel                 ├─ declared by config  → keep (and reconcile)
+  returns ["foo.example.com"]        ├─ in the pruned set   → delete
+                                     └─ otherwise           → keep
 ```
 
-Condition 3 is the reason this can ship at all. Condition 1 alone is weak: a user can edit a description, copy one, or type it by accident, and the field is not even visible in the dashboard. Condition 2 alone is exactly the rule that was rejected as unsafe. Together with 3, the plugin deletes only routes that **cannot** receive traffic, because it owns the DNS half and can see that nothing points at the tunnel anymore.
+*Rationale*: this is strictly stronger than the tag approach. It needs no ownership claim about the route, so it cannot misfire on a route the operator wrote by hand — if their DNS record was not pruned, their route is untouched. It also cannot drift out of sync with reality, because the signal is produced by the plugin's own action moments earlier rather than read back from a field the UI may have cleared.
 
-The asymmetry is deliberate and worth stating plainly: this is strictly more conservative than the DNS prune, which deletes on tags alone. DNS records are auditable through a documented, dashboard-visible comment; ingress rules are not.
+*Alternative rejected*: tag + undeclared (mirroring DNS prune). It depends on the field described in Context, and it deletes routes that may still resolve.
 
-*Consequence*: a route whose hostname still resolves is never pruned, even if the config no longer declares it. That case means either the DNS record belongs to another instance or it was hand-made — both are reasons to leave the route alone. The plugin logs it as "left in place" so the operator knows it exists.
+*Alternative rejected*: tag + undeclared + no DNS record. This is what the first draft proposed. It is safe, but it still hinges on the tag, so a route edited in the dashboard becomes permanently ineligible — the plugin could never clean up the very routes most likely to be stale.
 
-*Alternative rejected*: mirroring DNS prune exactly (tag + undeclared). It would delete routes that still resolve, and with the tag invisible in the UI a mistaken deletion would be undiagnosable.
+### D2: A declared host is never a prune candidate
 
-### D3: The catch-all is never a candidate
+`mergeIngressPlan` replaces a declared host's rule with the derived one before the prune decision, so declaration is checked first and wins.
 
-The default rule has an empty hostname, so conditions 2 and 3 cannot be expressed for it, and it is always re-emitted by the reconciler. It is excluded structurally, not by a special case: eligibility requires a non-empty hostname that is not declared and does not resolve, and the catch-all has none.
+This matters because a host can legitimately appear in the pruned set while still being declared: reverting a tunnel host to an address host deletes its CNAME in the same run (the migration path), yet the route may be wanted again the moment it is re-declared with `tunnel`. Declaration is the operator's current intent, so it takes precedence over a deletion that happened moments earlier.
 
-This also guarantees the written configuration can never become invalid — the API requires a terminating catch-all and one is always present.
+*Consequence*: reverting a host to an address host leaves its route behind. That is the existing, documented behaviour for undeclared routes, and it is inert — the hostname now resolves to an address, not through the tunnel.
 
-### D4: Prune after the plan write, in the same read-modify-write
+### D3: The catch-all is structurally ineligible
 
-The order inside one reconcile is: read the configuration → merge the derived plan (which preserves foreign rules) → delete eligible foreign rules → write once.
+The default rule has no hostname, so it cannot match a pruned name. It is also always re-emitted by the reconciler, and the API requires a terminating catch-all. Eligibility therefore cannot select it, and the written configuration can never become invalid.
 
-*Rationale*: doing it in one pass keeps the operation idempotent and avoids a second `PUT` that could race with `cloudflared`'s config sync. Deletions are applied to the already-merged rule list, so the write carries both the new plan and the removals.
+### D4: Only declared tunnels are touched
 
-*Alternative rejected*: a separate delete request after writing. Two writes per reconcile, a larger window for a partial failure, and the API offers no per-rule delete for this resource.
+The pruned-name set says *which names* died, not *which tunnel* hosted their routes. Routes live inside a tunnel's configuration, so pruning needs the tunnel UUID, which comes from the configuration.
 
-### D5: DNS-liveness is computed from the DNS phase, not re-read
+When at least one host still declares a tunnel UUID, that tunnel is visited and the set applies. When the configuration declares no tunnel at all, the plugin cannot tell which tunnel holds the route, and instead of enumerating every tunnel in the account — which would mean rewriting configurations the operator never declared to this plugin — it logs that manual removal is needed.
 
-The ingress prune needs the set of names that had no DNS record after the DNS phase. Two options: have the zone reconciliation return the names it left unpopulated, or re-read the zone's records in the ingress phase.
+*Rationale*: the account-wide enumeration is a far larger blast radius than the cleanup is worth, and it would contradict the plugin's rule of only touching what was declared to it.
 
-Chosen: the DNS phase already lists every record per zone; the ingress phase receives a set of "names with at least one record" per zone, so liveness is a map lookup rather than a second API call.
+*Consequence, documented*: removing the **last** tunnel host of a config prunes its DNS record and leaves its route, with a log line saying so. The common case — removing one host among several — is fully automated.
 
-*Rationale*: an extra `GET /dns_records` per zone per reconcile doubles the read traffic for a cleanup that runs rarely. The data is already in hand.
+### D5: One write per tunnel, in the same read-modify-write
 
-*Consequence*: if a zone's DNS reconciliation failed entirely, its names are unknown. In that case the ingress prune for that zone is **skipped** rather than treating unknown as "does not resolve" — failing closed, consistent with the rest of the plugin.
+The order in `reconcileOneTunnel` is: read → merge the derived plan (preserving foreign rules) → drop routes whose names were pruned → write once.
 
-### D6: Every deletion is logged with its evidence
+*Rationale*: a second request would double the write traffic and widen the window for a partial failure, and the API offers no per-rule delete for this resource. Deletions are applied to the already-merged list, so one `PUT` carries both the new plan and the removals.
 
-Each deletion logs the rule's hostname, service, the tag that authorised it, and the fact that no DNS record existed. Each rule that looked like a candidate but was spared logs why (still resolving / no tag). This is the audit trail that replaces the missing UI column.
+### D6: Every deletion is logged with its cause
 
-*Rationale*: with the tag invisible in the dashboard, the log is the operator's only way to reconstruct what the plugin decided and why. A silent delete would be unreviewable.
+Each pruned route logs its hostname and states that its DNS record was deleted in the same run, which is why it was unreachable. The plan-write line carries the pruned count.
+
+*Rationale*: the signal is a plugin action, not a user-visible field, so the log is how an operator reconstructs what happened. A silent delete would be unreviewable.
 
 ## Risks / Trade-offs
 
-- **[The tag is invisible, so deletions are hard to audit after the fact]** → D6 logs every deletion and every near-miss with its reason; the docs point at the log line. Accepted, because the alternative (no prune) is what created the accumulation problem.
-- **[A user copies the tag onto a hand-made route, and its DNS record is also gone]** → The route is deleted. This is the residual risk of any tag-based scheme; D2's liveness check means the route was unreachable anyway, so the blast radius is a configuration entry nobody could reach.
-- **[The dashboard may not round-trip `description` when a rule is edited in the UI]** → Unverified, and it fails safe in one direction only: a lost tag means the rule is never pruned (condition 1 fails), not that an unrelated rule is deleted. If this turns out to be true, prune silently stops working for edited rules; the log line for "candidate without tag" makes it visible.
-- **[A zone whose DNS reconciliation failed skips pruning]** → Intentional (D5). The zone already reports a DNS error, and the next reload retries.
-- **[Deleting a route whose DNS record is temporarily absent]** → A DNS record can be deleted by hand while the route is still wanted. The route becomes unreachable at that moment regardless, so pruning it changes nothing for traffic; recreating the DNS record recreates the route too, since both come from the same declaration. Documented in troubleshooting.
-- **[Prune is not reversible]** → The remedy is to re-declare the host, which recreates both halves. Documented as the recovery path.
+- **[Removing the tag leaves previously tagged rules with a `description`]** → Harmless: the field is inherited like `path` and `originRequest`, so it survives but is never read. Nothing is cleaned up, nothing breaks, and no migration is needed.
+- **[The last tunnel host cannot be pruned (D4)]** → Reported in the log with the remedy. Accepted rather than widening the blast radius to the whole account.
+- **[A route is deleted while a user still wants it]** → Only if its DNS record was pruned in the same run, meaning it stopped resolving anyway. Re-declaring the host recreates both halves. Documented as the recovery path.
+- **[A zone whose DNS reconcile failed]** → Its prune did not run, so its pruned set is empty and nothing is deleted. Failing closed falls out of the design rather than needing a special case.
+- **[The pruned set is hostname-keyed but routes are tunnel-scoped]** → A name could, in principle, exist in two zones. Prune only ever deletes the record for names it owns, and the route matches by hostname; a collision would require the same hostname in two managed zones, which zone assignment already prevents.
+- **[Reverting a tunnel host to an address host leaves its route]** → D2, inert and pre-existing.
 
 ## Migration Plan
 
-1. Landing the code changes nothing: without the existing `prune` opt-in, the pass is a no-op.
-2. Operators who already use `prune` for DNS gain route cleanup for free, limited to routes that are provably unreachable.
-3. Rollback: turn off `prune` for the zone; deletions already performed are not undone, but no further pruning happens.
+1. Landing the code changes nothing for configs without the `prune` opt-in.
+2. Configs that already prune gain route cleanup automatically, limited to routes whose DNS records this plugin deletes.
+3. Rules tagged by an earlier build keep their description; it is inherited from then on and never acted upon.
+4. Rollback: disable `prune` for the zone. Deletions already performed are not undone, but no further pruning happens.
 
 ## Open Questions
 
-- Whether the dashboard round-trips an unknown `description` when a rule is edited in the UI. Unverifiable without a browser session; the failure mode is safe (a lost tag disables prune for that rule) and the log makes it visible. Worth a manual check during implementation.
-- Whether Cloudflare rejects a configuration where every non-catch-all rule was removed — i.e. a plan consisting only of the catch-all. Expected to be accepted (the API requires a catch-all, not a minimum rule count), but the implementation should assert it rather than assume.
+- Whether Cloudflare accepts a configuration whose ingress list contains only the catch-all. Expected to be accepted (the API requires a catch-all, not a minimum rule count) and covered by a test, but worth confirming once against the live API.
+- Whether `pruneZone` should also prune routes for tunnels referenced only by hosts that have been removed — the D4 case. Deferred deliberately; it would need the tunnel UUID from somewhere other than the configuration.

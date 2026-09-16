@@ -35,12 +35,7 @@ func normalizeDefaultService(configured string) string {
 // calls that Caddy may run concurrently, so the slice order is not stable
 // between reloads; without sorting, an unchanged config would produce a
 // reordered plan and the drift check would report a change on every reload.
-//
-// Every rule carries the instance ownership tag in its description, the
-// ingress counterpart of the comment the plugin writes on DNS records. The tag
-// is written but not yet acted on: no rule is ever deleted, because a rule's
-// description cannot be trusted as proof of authorship when a user can edit it.
-func deriveIngressPlan(hosts []HostConfig, defaultService, tag string) map[string][]cfIngressRule {
+func deriveIngressPlan(hosts []HostConfig, defaultService string) map[string][]cfIngressRule {
 	def := normalizeDefaultService(defaultService)
 
 	byTunnel := make(map[string][]HostConfig)
@@ -66,15 +61,14 @@ func deriveIngressPlan(hosts []HostConfig, defaultService, tag string) map[strin
 				service = def
 			}
 			rules = append(rules, cfIngressRule{
-				Hostname:    strings.ToLower(hc.Host),
-				Service:     service,
-				Description: tag,
+				Hostname: strings.ToLower(hc.Host),
+				Service:  service,
 			})
 		}
 		// The default rule has no hostname, which is what makes it match all
 		// traffic. It is always present: the API requires a terminating
 		// catch-all, and it is also the "default route" the config asks for.
-		rules = append(rules, cfIngressRule{Service: def, Description: tag})
+		rules = append(rules, cfIngressRule{Service: def})
 		plans[tunnelID] = rules
 	}
 	return plans
@@ -88,11 +82,17 @@ func deriveIngressPlan(hosts []HostConfig, defaultService, tag string) map[strin
 // whose hostname is declared are replaced by the derived rule. Any existing
 // catch-all is dropped and re-emitted from the plan, so it is never duplicated.
 //
-// It reports whether the write is needed and which preserved rules shadow a
-// declared host. A wildcard foreign rule can match a hostname the config also
-// declares; since rules match top to bottom, the effective destination then
-// depends on ordering the plugin does not own, so callers warn about it.
-func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, changed bool, shadowed []string) {
+// A foreign rule is dropped only when its hostname is in prunedHosts, the set
+// of names whose DNS records this run deleted. That is the one case where the
+// route is provably unable to serve traffic, and it is the only deletion the
+// plugin performs on routes it did not derive.
+//
+// It reports whether the write is needed, which rules were pruned, and which
+// preserved rules shadow a declared host. A wildcard foreign rule can match a
+// hostname the config also declares; since rules match top to bottom, the
+// effective destination then depends on ordering the plugin does not own, so
+// callers warn about it.
+func mergeIngressPlan(current, plan []cfIngressRule, prunedHosts map[string]bool) (merged []cfIngressRule, changed bool, shadowed []string, pruned []string) {
 	declared := make(map[string]bool, len(plan))
 	for _, r := range plan {
 		if r.Hostname != "" {
@@ -105,8 +105,13 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 		if r.Hostname == "" {
 			continue // the catch-all is always re-emitted from the plan
 		}
-		if declared[strings.ToLower(r.Hostname)] {
+		host := strings.ToLower(r.Hostname)
+		if declared[host] {
 			continue // replaced by the derived rule
+		}
+		if prunedHosts[host] {
+			pruned = append(pruned, r.Hostname)
+			continue
 		}
 		preserved = append(preserved, r)
 
@@ -119,6 +124,7 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 		}
 	}
 	sort.Strings(shadowed)
+	sort.Strings(pruned)
 
 	merged = make([]cfIngressRule, 0, len(preserved)+len(plan))
 	merged = append(merged, preserved...)
@@ -130,13 +136,12 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 	// "don't destroy what you don't model" rule the raw-JSON fields follow.
 	inheritUnmanagedFields(merged, current)
 
-	return merged, !ingressRulesEqual(current, merged), shadowed
+	return merged, !ingressRulesEqual(current, merged), shadowed, pruned
 }
 
-// inheritUnmanagedFields copies the fields the plugin does not author — path
-// and originRequest — from the existing rule at the same hostname (the empty
-// hostname matching the catch-all). Description is deliberately NOT inherited:
-// the plugin authors it, so it comes from the derived plan.
+// inheritUnmanagedFields copies the fields the plugin does not author —
+// description, path and originRequest — from the existing rule at the same
+// hostname (the empty hostname matching the catch-all).
 //
 // Without this, a declared host's rule is regenerated from the derived plan
 // and anything the operator set in the dashboard on that rule is lost. An
@@ -148,15 +153,17 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 // cleared: a rule with no counterpart keeps its empty fields.
 func inheritUnmanagedFields(merged, current []cfIngressRule) {
 	type unmanaged struct {
+		description   string
 		path          json.RawMessage
 		originRequest json.RawMessage
 	}
 	byHost := make(map[string]unmanaged, len(current))
 	for _, r := range current {
-		if len(r.Path) == 0 && len(r.OriginRequest) == 0 {
+		if r.Description == "" && len(r.Path) == 0 && len(r.OriginRequest) == 0 {
 			continue
 		}
 		byHost[strings.ToLower(r.Hostname)] = unmanaged{
+			description:   r.Description,
 			path:          r.Path,
 			originRequest: r.OriginRequest,
 		}
@@ -165,6 +172,9 @@ func inheritUnmanagedFields(merged, current []cfIngressRule) {
 		prev, ok := byHost[strings.ToLower(merged[i].Hostname)]
 		if !ok {
 			continue
+		}
+		if merged[i].Description == "" {
+			merged[i].Description = prev.description
 		}
 		if len(merged[i].Path) == 0 {
 			merged[i].Path = prev.path
@@ -189,15 +199,14 @@ func wildcardMatches(pattern, host string) bool {
 }
 
 // ingressRulesEqual reports whether two rule slices are equivalent on the
-// fields the plugin manages: hostname, service and the ownership description.
+// fields the plugin manages: hostname and service.
 //
 // Comparing only managed fields is deliberate. Cloudflare normalises what it
 // stores (it may add an empty originRequest object and it bumps version), so a
 // deep equality check against the server's rendering would report drift on
 // every run and issue a write on every reload — an idempotence bug that a
-// mock returning a fixed document would never reveal. Path and originRequest
-// are therefore excluded, while description is included because the plugin
-// authors it and must correct a rule that lost or changed its tag.
+// mock returning a fixed document would never reveal. Description, path and
+// originRequest are therefore all excluded.
 func ingressRulesEqual(a, b []cfIngressRule) bool {
 	if len(a) != len(b) {
 		return false
@@ -209,33 +218,45 @@ func ingressRulesEqual(a, b []cfIngressRule) bool {
 		if a[i].Service != b[i].Service {
 			return false
 		}
-		if a[i].Description != b[i].Description {
-			return false
-		}
 	}
 	return true
 }
 
 // reconcileTunnelIngress derives and writes the ingress plan for every tunnel
-// declared by the given hosts. It is a separate phase from DNS reconciliation:
-// a tunnel's hosts can span zones, so grouping by zone would fragment a single
-// tunnel's plan into competing writes.
+// declared by the given hosts, and deletes routes whose DNS records this run
+// pruned. It is a separate phase from DNS reconciliation: a tunnel's hosts can
+// span zones, so grouping by zone would fragment a single tunnel's plan into
+// competing writes.
+//
+// It runs even with no declared tunnel hosts when prunedHosts is non-empty, so
+// a tunnel that just lost its last declaration still gets cleaned up.
 //
 // Failures are returned rather than fatal, so a Tunnel API problem never
 // prevents DNS reconciliation (and vice versa). A partial failure leaves DNS
 // correct and is retried on the next config load.
-func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []HostConfig, defaultService, tag string, logger *zap.Logger) error {
-	plans := deriveIngressPlan(hosts, defaultService, tag)
-	if len(plans) == 0 {
-		return nil
-	}
+func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []HostConfig, defaultService string, prunedHosts map[string]bool, logger *zap.Logger) error {
+	plans := deriveIngressPlan(hosts, defaultService)
 
-	// Deterministic order so logs and error aggregation are stable.
+	// Tunnels that still need visiting: those with a derived plan, plus any
+	// tunnel referenced by a pruned host that no longer appears in the plan.
 	tunnelIDs := make([]string, 0, len(plans))
 	for id := range plans {
 		tunnelIDs = append(tunnelIDs, id)
 	}
 	sort.Strings(tunnelIDs)
+
+	if len(tunnelIDs) == 0 {
+		if len(prunedHosts) > 0 {
+			// No tunnel is referenced by the config anymore, so the plugin does
+			// not know which tunnel the orphaned route belongs to. Listing every
+			// tunnel in the account to find it would mean rewriting tunnels the
+			// operator never declared to this plugin, which is a far larger
+			// blast radius than the cleanup is worth. Report and stop.
+			logger.Info("DNS records were pruned but no tunnel is declared, so their routes cannot be identified; remove them manually in the dashboard",
+				zap.Int("pruned_names", len(prunedHosts)))
+		}
+		return nil
+	}
 
 	var (
 		wg    sync.WaitGroup
@@ -248,7 +269,7 @@ func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []Host
 		wg.Add(1)
 		go func(tunnelID string, plan []cfIngressRule) {
 			defer wg.Done()
-			if err := reconcileOneTunnel(ctx, cli, tunnelID, plan, defaultService, logger); err != nil {
+			if err := reconcileOneTunnel(ctx, cli, tunnelID, plan, defaultService, prunedHosts, logger); err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
@@ -263,9 +284,10 @@ func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []Host
 	return nil
 }
 
-// reconcileOneTunnel reads one tunnel's configuration, merges the derived plan
-// and writes it back only when something changed.
-func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string, plan []cfIngressRule, defaultService string, logger *zap.Logger) error {
+// reconcileOneTunnel reads one tunnel's configuration, merges the derived plan,
+// drops routes whose DNS records this run pruned, and writes back only when
+// something changed.
+func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string, plan []cfIngressRule, defaultService string, prunedHosts map[string]bool, logger *zap.Logger) error {
 	log := logger.With(zap.String("tunnel_id", tunnelID))
 
 	current, err := cli.getConfiguration(ctx, tunnelID)
@@ -284,10 +306,14 @@ func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string,
 			"recreate the tunnel as remotely-managed, or remove its hosts from the plugin", tunnelID)
 	}
 
-	merged, changed, shadowed := mergeIngressPlan(current.Config.Ingress, plan)
+	merged, changed, shadowed, pruned := mergeIngressPlan(current.Config.Ingress, plan, prunedHosts)
 	for _, s := range shadowed {
 		log.Warn("preserved wildcard ingress rule shadows a declared host; the effective destination depends on rule order",
 			zap.String("shadowing", s))
+	}
+	for _, host := range pruned {
+		log.Info("deleted route whose DNS record was pruned; the name no longer resolves so the route was unreachable",
+			zap.String("hostname", host))
 	}
 
 	if !changed {
@@ -308,6 +334,7 @@ func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string,
 	log.Info("wrote tunnel ingress plan",
 		zap.Int("rules", len(merged)),
 		zap.Int("preserved_foreign_rules", len(merged)-len(plan)),
+		zap.Int("pruned_routes", len(pruned)),
 		zap.String("catch_all_origin", origin))
 	return nil
 }

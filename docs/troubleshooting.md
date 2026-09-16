@@ -155,12 +155,22 @@ and keep maintaining `config.yml` yourself.
 
 ### A removed host still appears in the tunnel's Routes
 
-Expected. The plugin writes its instance tag into each rule's Description field,
-but never deletes a rule on that basis: a description is user-editable, so it is
-not proof of authorship. The leftover is inert — if the zone has `prune`, the
-CNAME was deleted too, so the hostname no longer resolves. Delete the rule by
-hand in the dashboard if you want it gone; it is the one whose Description shows
-your instance tag.
+Expected in two cases. The plugin removes a route automatically only when it
+also deletes that hostname's DNS record in the same run:
+
+- **This was the last tunnel host of the config.** With no tunnel declared the
+  plugin cannot tell which tunnel holds the route, and it will not scan the
+  account's tunnels to find out. The log says so explicitly. The route is inert:
+  the hostname no longer resolves. Delete it by hand in the dashboard.
+- **The zone has no `prune`.** Nothing was deleted, so there was nothing to
+  correlate with. Enable `prune` on the zone and reload.
+
+### A route was pruned and I want it back
+
+Re-declare the host with `tunnel <uuid>`. Both halves are recreated from the
+same declaration: the DNS record and the route. Prune is not reversible on its
+own, which is why it only ever removes routes whose record it deleted moments
+earlier.
 
 ### An undeclared subdomain resolves
 

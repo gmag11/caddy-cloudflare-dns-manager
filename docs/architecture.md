@@ -158,10 +158,11 @@ Reconcile(hosts)
    └─ resolve account: explicit account_id, else a resolved zone's account
       └─ per tunnel (goroutine):
          ├─ GET  /accounts/{id}/cfd_tunnel/{id}/configurations
-         ├─ derive plan    → declared host rules sorted by FQDN + instance tag,
-         │                    catch-all last
+         ├─ derive plan    → declared host rules sorted by FQDN, catch-all last
          ├─ merge          → preserve foreign rules, replace declared ones,
-         │                    inherit path/originRequest from the existing rule
+         │                    inherit description/path/originRequest
+         ├─ prune          → drop foreign rules whose DNS record this run
+         │                    deleted (they can no longer receive traffic)
          └─ PUT (only on drift)
 ```
 
@@ -183,26 +184,36 @@ document. Dropping `warp-routing` would silently break private-network access.
 (adding an empty `originRequest`, bumping `version`), so a deep comparison would
 write on every reload. This is the phase's idempotence guarantee.
 
-### Why ingress rules are tagged but never deleted
+### Why route cleanup follows the DNS record
 
-DNS records carry an ownership tag in their comment, so the plugin can tell its
-own from someone else's. Ingress rules have a `description` field that accepts
-the same marker, and the plugin writes `<tag_prefix>:<instance>` into every rule
-it authors — the tag is part of the derived plan and participates in drift
-detection, so a rule that loses its tag is corrected.
+A tunnel host has two halves, and removing a host prunes the DNS record while
+leaving the route. Cleaning the route up needs no ownership marker, because the
+plugin has a stronger signal available: it just deleted the record that made the
+hostname reachable. At that moment the route cannot serve traffic, so deleting
+it is not an inference.
 
-**The tag is not used for deletion.** Writing it does not make deletion safe:
-a description is an ordinary editable field, so a mistaken copy or a hand-typed
-value would be indistinguishable from a genuine tag, and acting on it would mean
-deleting a route that serves live traffic. The plugin therefore removes nothing,
-and a rule whose host is no longer declared stays on the tunnel until a human
-deletes it.
+```
+DNS phase (per zone)                    ingress phase (per tunnel)
+────────────────────                    ──────────────────────────
+pruneZone deletes an owned record   →   the deleted hostname set
+  and returns the hostnames             feeds mergeIngressPlan:
+                                          ├─ declared by config → keep
+                                          ├─ in the pruned set  → delete
+                                          └─ otherwise          → preserve
+```
 
-The consequence is accepted and documented: removing a host leaves its ingress
-rule behind. The rule is inert because the DNS record is pruned at the same
-time, so the hostname stops resolving. An ingress prune is a natural follow-up
-now that the data exists, but it needs its own design — the failure mode of
-deleting the wrong rule is worse than leaving an inert orphan.
+An earlier design wrote `<tag_prefix>:<instance>` into each rule's
+`description`, mirroring the DNS comment. That was abandoned after verifying
+that `description` is absent from Cloudflare's documented ingress model, is not
+rendered by the dashboard, and is **cleared by the dashboard** whenever a rule
+is edited there. A marker that is invisible, undocumented and erased by normal
+use cannot support a destructive decision. It is now treated as an unmanaged
+field: inherited on rewrite, never read.
+
+One case stays manual and is logged: when the config declares no tunnel at all,
+the plugin cannot tell which tunnel holds an orphaned route, and enumerating the
+account's tunnels would mean writing configurations the operator never declared
+to it.
 
 ### Authorization boundary
 

@@ -1,60 +1,56 @@
-## 1. Liveness data from the DNS phase
+## 1. Revert the ownership-tag mechanism
 
-- [ ] 1.1 Have `reconcileZone` return, alongside the account id, the set of zone-relative record names that have at least one record, so the ingress phase can answer "does this hostname resolve?" without a second API call
-- [ ] 1.2 Collect that set per zone in `Reconcile` next to `accountByZone`, and pass it into `reconcileIngressPhase`
-- [ ] 1.3 Represent "unknown" distinctly from "empty": when a zone's DNS reconciliation failed, its entry carries no liveness data so the prune pass skips it rather than treating every name as unresolvable
-- [ ] 1.4 Unit-test the unknown-vs-empty distinction at the boundary, since the whole fail-closed guarantee rests on it
+- [x] 1.1 Drop the `tag` parameter from `deriveIngressPlan` and stop writing `Description` into derived rules
+- [x] 1.2 Remove `Description` from `ingressRulesEqual`, so the field is no longer a drift signal
+- [x] 1.3 Restore `Description` to `inheritUnmanagedFields` alongside `path` and `originRequest`, so an operator-set value survives a rewrite
+- [x] 1.4 Drop the tag argument from `reconcileTunnelIngress` and its call site in `reconcileIngressPhase`
+- [x] 1.5 Replace the tag-semantics tests with their inverse: the plugin does not author a description, does not treat one as drift, and preserves the operator's value on rewritten rules
 
-## 2. Eligibility
+## 2. Correlate DNS deletions with routes
 
-- [ ] 2.1 Implement `pruneEligible(rule cfIngressRule, tag string, declared map[string]bool, resolving map[string]bool, zonePrune bool) (eligible bool, sparedReason string)` returning the reason a rule was spared, so the caller can log it
-- [ ] 2.2 Enforce the three conditions in the documented order and return a distinct reason for each: no/other tag, declared hostname, resolving hostname
-- [ ] 2.3 Exclude the catch-all structurally (empty hostname is never eligible) rather than by a special case, and keep it in the merged list
-- [ ] 2.4 Resolve each rule's hostname to its owning zone (longest declared-zone suffix, as zone assignment already does) and require that zone to have declared `prune`
-- [ ] 2.5 Unit tests: each condition alone spares the rule; all three together make it eligible; a rule tagged by another instance is spared; the catch-all is never eligible
+- [x] 2.1 Have `pruneZone` return the fully-qualified hostnames it deleted, including the partial-progress list when a deletion fails mid-loop
+- [x] 2.2 Introduce `reconcileZoneResult` carrying the zone's account id and the pruned hostnames, and return it from `reconcileZone` on every path
+- [x] 2.3 Collect the pruned hostnames per zone in `Reconcile` next to `accountByZone`, and pass the flattened set into `reconcileIngressPhase`
+- [x] 2.4 Flatten the per-zone sets to a single lowercased hostname set in the ingress phase, since route matching is zone-agnostic
+- [x] 2.5 Confirm a zone whose DNS reconcile failed contributes no pruned names, so its routes are never candidates
 
-## 3. Prune pass
+## 3. Prune in the ingress phase
 
-- [ ] 3.1 Implement `pruneIngressRules(merged []cfIngressRule, tag string, declared map[string]bool, resolving map[string]bool, zonePrunes map[string]bool) (kept []cfIngressRule, pruned []prunedRule)` as a pure function over the merged rule list, so it is testable without an API
-- [ ] 3.2 Apply it inside `reconcileOneTunnel` after `mergeIngressPlan` and before the write, so the plan update and the deletions land in one `PUT`
-- [ ] 3.3 Gate the whole pass on the tunnel's zone set being resolvable; skip the tunnel with a debug log when liveness for the relevant zone is unknown
-- [ ] 3.4 Verify by test that a reconcile which both updates the plan and prunes issues exactly one update request
-- [ ] 3.5 Verify by test that a follow-up reconcile with nothing left to prune issues zero update requests
-- [ ] 3.6 Test that pruning every host-declared rule leaves a configuration whose only entry is the catch-all, and that the write succeeds
+- [x] 3.1 Add the pruned-name set as a parameter of `mergeIngressPlan`, and drop a foreign rule only when its hostname is in that set
+- [x] 3.2 Return the list of pruned hostnames from `mergeIngressPlan` so the caller can log each one
+- [x] 3.3 Check declaration before prune eligibility, so a declared host is never a candidate even when its name appears in the pruned set
+- [x] 3.4 Keep the catch-all structurally ineligible (it has no hostname) and always re-emitted
+- [x] 3.5 Apply the deletions to the merged list before the single write, so the plan update and the removals land in one request
+- [x] 3.6 Run the phase even when the config declares no tunnel hosts, but only to report; do not enumerate the account's tunnels
+- [x] 3.7 Log each pruned route with its hostname and the reason (its DNS record was pruned in the same run), and include the pruned count in the plan-write line
 
-## 4. Logging and auditability
+## 4. Tests
 
-- [ ] 4.1 Log each deletion at Info with the rule's hostname, service, the authorising tag, and an explicit statement that no DNS record existed
-- [ ] 4.2 Log each spared near-candidate at Info with the condition that spared it (no tag, another instance's tag, declared, or still resolving), so a non-prune is explainable
-- [ ] 4.3 Include the pruned count in the existing "wrote tunnel ingress plan" log line so a reconcile's effect is visible at a glance
-- [ ] 4.4 Confirm no path logs a rule's description verbatim in a way that could be mistaken for a secret; the tag is configuration, not a credential
+- [x] 4.1 Prune removes the route whose DNS record this run deleted
+- [x] 4.2 Nothing pruned: an undeclared route is preserved, however stale
+- [x] 4.3 A declared host is never pruned, even when its name is in the pruned set
+- [x] 4.4 The catch-all is never removed and always terminates the configuration
+- [x] 4.5 Pruning all of a tunnel's host routes leaves a valid configuration
+- [x] 4.6 A second reconcile after a prune issues no write (idempotence)
+- [x] 4.7 No tunnel declared: no request is made and the need for manual removal is logged
+- [x] 4.8 `mergeIngressPlan` reports exactly the pruned hostnames, and a name in the set with no matching rule changes nothing
+- [x] 4.9 The plugin authors no description, and a description that appears is not drift
 
-## 5. Integration tests against the mock API
+## 5. Documentation
 
-- [ ] 5.1 Extend the mock tunnel API to record the written rule list per version so a test can assert what survived
-- [ ] 5.2 Prune removes an eligible orphan and leaves the declared rules and the catch-all intact
-- [ ] 5.3 No opt-in: the same input deletes nothing
-- [ ] 5.4 Opt-in but hostname still resolving: deletes nothing and logs the sparing reason
-- [ ] 5.5 Opt-in but the rule is untagged: deletes nothing
-- [ ] 5.6 Opt-in but the rule belongs to another instance's tag: deletes nothing
-- [ ] 5.7 Declared host in a `prune` zone: never a candidate, and its drift is still corrected
-- [ ] 5.8 Zone DNS failure: no pruning for that zone, and no write of any kind when the plan is otherwise unchanged
-- [ ] 5.9 Two zones, only one with `prune`: only that zone's orphan is removed
-- [ ] 5.10 End-to-end failure isolation still holds: a prune error is surfaced without preventing DNS reconciliation
+- [ ] 5.1 Document in `docs/cloudflare-tunnel.md` that route cleanup is driven by DNS prune: a route is removed when the plugin deletes the record that made its hostname reachable
+- [ ] 5.2 State the limit plainly: removing the last tunnel host prunes the record and leaves the route, with a log line pointing at manual removal
+- [ ] 5.3 Remove the documentation that described the ownership tag on routes, including the Description-column note and the "tag alone never authorises deletion" wording
+- [ ] 5.4 Add a troubleshooting entry for a route that was pruned and how to restore it (re-declare the host)
+- [ ] 5.5 Add a troubleshooting entry for the "no tunnel declared" case
+- [ ] 5.6 Update `docs/architecture.md`: the ingress phase now consumes the DNS phase's pruned-name set, and why the correlation replaced the tag
+- [ ] 5.7 Update the README's tunnel section accordingly
 
-## 6. Documentation
+## 6. Verification
 
-- [ ] 6.1 Document the opt-in and the three conditions in `docs/cloudflare-tunnel.md`, stating plainly that a route is deleted only when it cannot receive traffic
-- [ ] 6.2 Explain why ingress prune is stricter than DNS prune: the tag is not rendered by the dashboard, so liveness is the auditable proof
-- [ ] 6.3 Add a troubleshooting entry covering a route that was pruned and how to restore it (re-declare the host)
-- [ ] 6.4 Add a troubleshooting entry for "my orphaned route was not pruned", enumerating the conditions and pointing at the sparing log line
-- [ ] 6.5 Update `docs/architecture.md` with the prune pass, its position in the ingress phase, and the fail-closed behaviour when liveness is unknown
-- [ ] 6.6 Update the README's tunnel section to mention that `prune` now also cleans up routes
-
-## 7. Verification
-
-- [ ] 7.1 Run `go build ./...`, `go vet ./...`, `gofmt -l .` and the full `go test ./...`
-- [ ] 7.2 Run `openspec validate prune-orphaned-tunnel-routes --strict`
-- [ ] 7.3 Confirm the regression baseline: with no `prune` opt-in the pre-existing suite passes unchanged
-- [ ] 7.4 Manual E2E in `testenv`: remove a tunnel host, confirm its DNS record and its ingress rule are both gone, and confirm a declared host's rule keeps its `originRequest`
-- [ ] 7.5 Manual E2E negative: with the orphan's DNS record left in place by hand, confirm the rule is preserved and the sparing reason is logged
+- [ ] 6.1 Run `go build ./...`, `go vet ./...`, `gofmt -l .` and the full `go test ./...`
+- [ ] 6.2 Run `openspec validate prune-orphaned-tunnel-routes --strict`
+- [ ] 6.3 Confirm the regression baseline: with no `prune` opt-in the pre-existing suite passes unchanged
+- [ ] 6.4 Manual E2E in `testenv`: remove one tunnel host among several, confirm its DNS record and its route are both gone, and that a declared host keeps its `originRequest`
+- [ ] 6.5 Manual E2E negative: with a tunnel host's DNS record left in place, confirm its route is preserved
+- [ ] 6.6 Manual E2E for the documented limit: remove the last tunnel host and confirm the log line about manual removal appears

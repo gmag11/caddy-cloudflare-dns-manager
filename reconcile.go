@@ -69,8 +69,12 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	// accountByZone captures the owning account id of each reconciled zone, as
 	// reported by the zone lookup. The ingress phase needs it for the Tunnel
 	// API path, and this avoids a second lookup.
+	// prunedHosts collects, per zone, the hostnames whose DNS records this run
+	// pruned: their routes can no longer receive traffic and are the only ones
+	// the ingress phase is allowed to delete.
 	var acctMu sync.Mutex
 	accountByZone := make(map[string]string)
+	prunedByZone := make(map[string][]string)
 
 	for zkey, zoneHosts := range byZone {
 		cli, ok := zoneClients[zkey]
@@ -82,17 +86,20 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		go func(zone string, cli *cloudflareClient, zoneHosts []HostConfig) {
 			defer wg.Done()
 			det := familyDetection{ipv4: publicIP, ipv6: publicIP6, ipv4Failed: ipDetectionFailed, ipv6Failed: ip6DetectionFailed}
-			accountID, err := app.reconcileZone(ctx, cli, zone, zoneHosts, det)
+			res, err := app.reconcileZone(ctx, cli, zone, zoneHosts, det)
 			if err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
 			}
 			acctMu.Lock()
-			if accountID != "" {
-				accountByZone[zone] = accountID
+			defer acctMu.Unlock()
+			if res.accountID != "" {
+				accountByZone[zone] = res.accountID
 			}
-			acctMu.Unlock()
+			if len(res.prunedHosts) > 0 {
+				prunedByZone[zone] = res.prunedHosts
+			}
 		}(zkey, cli, zoneHosts)
 	}
 	wg.Wait()
@@ -102,7 +109,7 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	// without fragmenting one tunnel's plan across concurrent writes. Failures
 	// here are aggregated alongside zone failures, never fatal, so a Tunnel
 	// API problem cannot leave DNS unreconciled.
-	if err := app.reconcileIngressPhase(ctx, hosts, accountByZone); err != nil {
+	if err := app.reconcileIngressPhase(ctx, hosts, accountByZone, prunedByZone); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -122,21 +129,30 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 // cfargotunnel.com CNAME only proxies records in the same account — so the
 // zone's account is the tunnel's account, and the user does not have to
 // configure it.
-func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, accountByZone map[string]string) error {
+//
+// prunedByZone carries the hostnames whose DNS records the DNS phase deleted.
+// Their routes are the only ones this phase may delete: the DNS record the
+// route depended on is gone, so the route can no longer receive traffic.
+// Nothing is inferred from the route itself.
+func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, accountByZone map[string]string, prunedByZone map[string][]string) error {
 	tunnelHosts := 0
 	for _, hc := range hosts {
 		if hc.TunnelID != "" {
 			tunnelHosts++
 		}
 	}
-	if tunnelHosts == 0 {
+	// The phase also runs when there is nothing declared, so a tunnel that just
+	// lost its last host still gets its orphaned route cleaned up.
+	if tunnelHosts == 0 && len(prunedByZone) == 0 {
 		return nil
 	}
 
 	if app.TunnelAPIToken == "" {
-		app.logger.Info("tunnel hosts declared but no tunnel API token configured; skipping tunnel ingress management",
-			zap.Int("tunnel_hosts", tunnelHosts),
-			zap.String("hint", "add `account <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
+		if tunnelHosts > 0 {
+			app.logger.Info("tunnel hosts declared but no tunnel API token configured; skipping tunnel ingress management",
+				zap.Int("tunnel_hosts", tunnelHosts),
+				zap.String("hint", "add `account <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
+		}
 		return nil
 	}
 
@@ -148,8 +164,17 @@ func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, a
 		return nil
 	}
 
+	// Flatten the per-zone pruned hostnames into one set: a route may point at
+	// a hostname in any declared zone, and membership is all that matters.
+	pruned := make(map[string]bool)
+	for _, names := range prunedByZone {
+		for _, n := range names {
+			pruned[strings.ToLower(n)] = true
+		}
+	}
+
 	cli := newTunnelClientWithBase(app.apiBase, accountID, app.TunnelAPIToken)
-	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, app.ownershipTag(), app.logger)
+	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, pruned, app.logger)
 }
 
 // resolveAccountID returns the account id for tunnel API calls. An explicit
@@ -238,24 +263,34 @@ func (app *App) detectPublicIPs(ctx context.Context, hosts []HostConfig) (ipv4, 
 	return ipv4, ipv6, ipv4Failed, ipv6Failed
 }
 
+// reconcileZoneResult carries what the per-zone pass learned that later phases
+// need: the zone's owning account (for the Tunnel API path) and the hostnames
+// whose DNS records this pass pruned (so the ingress phase can delete the
+// matching now-unreachable routes).
+type reconcileZoneResult struct {
+	accountID   string
+	prunedHosts []string
+}
+
 // reconcileZone reconciles all hosts in one zone, then prunes if enabled. It
-// returns the zone's owning account id (empty when the lookup failed) so the
-// ingress phase can address the Tunnel API without a second lookup.
+// returns the zone's owning account id (empty when the lookup failed) and the
+// hostnames pruned in this pass, so the ingress phase can address the Tunnel
+// API without a second lookup and clean up routes that just became unreachable.
 func (app *App) reconcileZone(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone string,
 	hosts []HostConfig,
 	det familyDetection,
-) (string, error) {
+) (reconcileZoneResult, error) {
 	zoneID, accountID, err := cli.zoneByName(ctx, zone)
 	if err != nil {
-		return "", fmt.Errorf("zone %q: %v", zone, err)
+		return reconcileZoneResult{}, fmt.Errorf("zone %q: %v", zone, err)
 	}
 
 	records, err := cli.listRecords(ctx, zoneID)
 	if err != nil {
-		return "", fmt.Errorf("zone %q: listing records: %v", zone, err)
+		return reconcileZoneResult{accountID: accountID}, fmt.Errorf("zone %q: listing records: %v", zone, err)
 	}
 
 	// Canonical map from zone-relative record name ("@", "foo", "a.b") and
@@ -340,12 +375,16 @@ func (app *App) reconcileZone(
 		}
 	}
 
+	var prunedNames []string
 	if app.zonePruneEnabled(zone) {
-		if err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag); err != nil {
-			return accountID, fmt.Errorf("zone %q: prune: %v", zone, err)
+		names, err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag)
+		if err != nil {
+			return reconcileZoneResult{accountID: accountID, prunedHosts: names},
+				fmt.Errorf("zone %q: prune: %v", zone, err)
 		}
+		prunedNames = names
 	}
-	return accountID, nil
+	return reconcileZoneResult{accountID: accountID, prunedHosts: prunedNames}, nil
 }
 
 // markManaged records that the declared config asks the plugin to manage a
@@ -585,7 +624,11 @@ func resolveFamilyIP(literal, detected string, detectionFailed bool) (string, bo
 }
 
 // pruneZone deletes records tagged with this instance whose (name, type) is
-// not managed by the declared configuration.
+// not managed by the declared configuration. It returns the hostnames it
+// deleted, so the tunnel ingress pass can delete the matching route: a route
+// whose DNS record this plugin just removed can no longer receive traffic, and
+// that makes it safe to delete without needing an ownership marker on the
+// route itself.
 func (app *App) pruneZone(
 	ctx context.Context,
 	cli *cloudflareClient,
@@ -593,7 +636,8 @@ func (app *App) pruneZone(
 	records []cfDNSRecord,
 	managed map[string]map[string]bool,
 	tag string,
-) error {
+) ([]string, error) {
+	var deletedNames []string
 	for i := range records {
 		r := &records[i]
 		if !isOwnedByInstance(r.Comment, tag) {
@@ -604,8 +648,9 @@ func (app *App) pruneZone(
 			continue
 		}
 		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
-			return fmt.Errorf("deleting orphan %s (%s): %v", r.Name, r.ID, err)
+			return deletedNames, fmt.Errorf("deleting orphan %s (%s): %v", r.Name, r.ID, err)
 		}
+		deletedNames = append(deletedNames, fqdn(r.Name, zone))
 		app.logger.Info("pruned orphan record",
 			zap.String("fqdn", fqdn(r.Name, zone)),
 			zap.String("name", key),
@@ -614,7 +659,7 @@ func (app *App) pruneZone(
 			zap.String("content", r.Content),
 			zap.String("record_id", r.ID))
 	}
-	return nil
+	return deletedNames, nil
 }
 
 // fqdn returns the fully-qualified form of a record name relative to zone.

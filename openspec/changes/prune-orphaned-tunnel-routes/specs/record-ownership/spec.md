@@ -2,7 +2,7 @@
 
 ### Requirement: Per-zone orphan prune
 
-The plugin SHALL provide a `prune` marker on a zone declaration in the global block. When enabled for a zone, the plugin SHALL delete this instance's orphaned artifacts belonging to that zone: A and AAAA records that carry this instance's tag but that the current configuration no longer manages (hosts removed from the Caddyfile, and the AAAA of a host whose IPv6 is disabled via `ip6 false` or absent), and — per the `tunnel-ingress-prune` capability — orphaned tunnel ingress rules whose hostname belongs to that zone. Prune eligibility SHALL be determined solely by the declared configuration; a record skipped due to a transient detection failure SHALL NOT be pruned. Prune SHALL only ever delete artifacts tagged with this instance's identifier; it SHALL NOT delete records without the tag or tagged with a different instance. Ingress rules additionally require the hostname to have no DNS record before they are eligible. When not enabled, orphaned records and rules SHALL be left in place.
+The plugin SHALL provide a `prune` marker on a zone declaration in the global block. When enabled for a zone, the plugin SHALL delete this instance's orphaned artifacts belonging to that zone: A and AAAA records that carry this instance's tag but that the current configuration no longer manages (hosts removed from the Caddyfile, and the AAAA of a host whose IPv6 is disabled via `ip6 false` or absent), and tunnel ingress routes whose hostname's DNS record this same run pruned (see the `tunnel-ingress-prune` capability). Prune eligibility SHALL be determined solely by the declared configuration; a record skipped due to a transient detection failure SHALL NOT be pruned. Prune SHALL only ever delete artifacts tagged with this instance's identifier, or — for the tunnel routes it deletes — those it matches to a DNS deletion performed in the same run; it SHALL NOT delete records without the tag, records tagged with a different instance, or routes it cannot attribute to such a deletion. When not enabled, orphaned records and routes SHALL be left in place.
 
 #### Scenario: Prune removes this instance's orphans
 
@@ -39,12 +39,12 @@ The plugin SHALL provide a `prune` marker on a zone declaration in the global bl
 - **WHEN** `prune` is declared on a zone, a tagged AAAA exists for an `ip6 auto` host, and IPv6 detection fails on this reload
 - **THEN** the plugin does not delete the AAAA record
 
-#### Scenario: Prune also covers orphaned ingress rules
+#### Scenario: Prune also covers routes made unreachable by its own deletions
 
-- **WHEN** `prune` is declared on a zone and a tunnel hosts an undeclared, instance-tagged rule whose hostname has no DNS record
-- **THEN** that ingress rule is deleted as part of the same zone's cleanup
+- **WHEN** `prune` is declared on a zone and the records it deletes include the one that made a tunnel hostname reachable
+- **THEN** the matching tunnel route is deleted as part of the same run and the same write
 
-#### Scenario: Ingress prune requires the liveness condition
+#### Scenario: A route whose record prune did not delete is kept
 
-- **WHEN** `prune` is declared on a zone and a tunnel hosts an undeclared, instance-tagged rule whose hostname still resolves
-- **THEN** the ingress rule is preserved even though the zone opted in
+- **WHEN** `prune` is declared on a zone but a tunnel route's hostname still has a live record
+- **THEN** the route is preserved even though the zone opted in

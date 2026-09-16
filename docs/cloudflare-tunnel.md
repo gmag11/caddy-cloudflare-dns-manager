@@ -285,13 +285,20 @@ Delete the host's `cf_dns_manager` block (or the whole site block). On the next
 reload, in a zone declared with `prune`, the now-orphaned CNAME — carrying this
 instance's tag — is deleted. Without `prune`, the CNAME is left in place.
 
-The hostname's **ingress rule is not deleted.** Rules written by the plugin do
-carry the instance tag in their Description field, but the plugin deliberately
-does not act on it for deletion: a description can be edited by hand, so it is
-not proof of authorship, and removing the wrong rule would take a live route
-down. The leftover rule is inert — with the CNAME pruned, the hostname no longer
-resolves, so nothing reaches it. Remove it by hand in the dashboard (it is the
-rule whose Description shows your instance tag) if you want the Routes list tidy.
+The hostname's **ingress rule is removed automatically when its record is pruned.**
+In a `prune`-enabled zone the plugin deletes the CNAME, so the hostname stops
+resolving; in the same reconcile it deletes the now-unreachable route. There is
+no marker involved and nothing is inferred: the route is removed because the
+plugin just made it dead.
+
+Two cases leave the route in place, both inert:
+
+- **The hostname's record was not pruned** (the zone has no `prune`, or the name
+  still resolves). The route is preserved.
+- **This was the last tunnel host of the config.** With no tunnel declared the
+  plugin cannot tell which one holds the route, and it will not scan the
+  account's tunnels. It logs that manual removal is needed; the route is inert
+  because the hostname no longer resolves.
 
 The tunnel itself is not touched by the plugin; remove it separately with
 `cloudflared tunnel delete <name>` or from the dashboard.
@@ -320,16 +327,19 @@ Notes:
   rule, so they may point at different services via `tunnel_service`.
 - With the `account` line, the plugin manages both halves: the CNAME (per host)
   and the ingress rule (per host), plus the tunnel's catch-all.
-- Every rule the plugin writes carries the instance ownership tag in its
-  **Description** field (visible in the dashboard's Routes tab), the same
-  `<tag_prefix>:<instance>` marker used on DNS records. It identifies which
-  Caddy instance authored the rule.
-- The tag is informational for now: **the plugin never deletes a rule**, because
-  a description can be edited by hand and so is not proof of authorship.
-  Removing a host leaves its rule in place until you delete it yourself.
 - Ingress rules the plugin did not derive from your config are preserved
-  untouched. A preserved wildcard rule that also matches a declared hostname
-  produces a warning, because rule order then decides the destination.
+  untouched, and a `description`, `path` or `originRequest` you set on them is
+  carried through. A preserved wildcard rule that also matches a declared
+  hostname produces a warning, because rule order then decides the destination.
+- **Route cleanup follows the DNS record.** In a zone declared with `prune`,
+  when the plugin deletes the record that made a tunnel hostname reachable, it
+  deletes that hostname's route in the same reconcile: the route can no longer
+  receive traffic, so nothing is inferred. A route whose record still exists is
+  never touched, and a declared host's route is never removed.
+- **Removing the last tunnel host leaves its route behind.** With no tunnel
+  declared, the plugin cannot tell which tunnel holds the route, and it will not
+  scan the account's tunnels to find out. It logs the orphan instead; delete it
+  by hand in the dashboard. Removing one host among several is fully automatic.
 
 ### The tunnel ingress configuration (`cloudflared` side)
 

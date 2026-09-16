@@ -2,100 +2,104 @@
 
 ### Requirement: Prune is opt-in per zone
 
-The plugin SHALL delete orphaned tunnel ingress rules only when the zone owning the rule's hostname has declared `prune`. Absent that opt-in, the plugin SHALL NOT delete any ingress rule and SHALL behave exactly as before this capability existed.
+The plugin SHALL delete an orphaned tunnel ingress route only when the zone that owns the route's hostname has declared `prune`. Absent that opt-in the plugin SHALL NOT delete any ingress route.
 
 #### Scenario: Opt-in absent
 
 - **WHEN** a host is removed from the config and its zone has not declared `prune`
-- **THEN** no ingress rule is deleted
+- **THEN** no ingress route is deleted
 
 #### Scenario: Opt-in present
 
-- **WHEN** a zone declares `prune` and an eligible orphaned rule exists
-- **THEN** the rule is deleted
+- **WHEN** a zone declares `prune` and an eligible orphaned route exists
+- **THEN** the route is deleted
 
 #### Scenario: Opt-in is scoped to the owning zone
 
-- **WHEN** one zone declares `prune` and another does not, and both have an eligible orphaned rule
-- **THEN** only the rule whose hostname belongs to the opted-in zone is deleted
+- **WHEN** one zone declares `prune` and another does not, and both own an eligible route
+- **THEN** only the route whose hostname belongs to the opted-in zone is deleted
 
-### Requirement: Prune eligibility requires all three conditions
+### Requirement: A route is eligible only when its DNS record was pruned in the same run
 
-A rule SHALL be a prune candidate only when every one of the following holds: its `description` equals this instance's ownership tag; its `hostname` is non-empty and not declared by this configuration; and its `hostname` has no DNS record in its zone. The plugin SHALL NOT delete a rule that fails any condition, regardless of the opt-in.
+The plugin SHALL delete an ingress route only when its hostname is one whose DNS record the plugin deleted during the same reconcile. Any other route SHALL be preserved, whatever its declaration state or DNS state.
 
-#### Scenario: All conditions hold
+#### Scenario: DNS record pruned in this run
 
-- **WHEN** a rule is tagged by this instance, its hostname is undeclared, and no DNS record exists at that name
-- **THEN** the rule is deleted
+- **WHEN** the DNS prune deletes the record for `gone.example.com` and the tunnel holds a route for that hostname
+- **THEN** the route is deleted in the same reconcile
 
-#### Scenario: Untagged rule spared
+#### Scenario: DNS record not pruned
 
-- **WHEN** a rule has no description, or a description that is not this instance's tag
-- **THEN** the rule is preserved, whatever its DNS state
+- **WHEN** a route is not declared by the config but its hostname's DNS record was not deleted in this run
+- **THEN** the route is preserved
 
-#### Scenario: Another instance's tag spared
+#### Scenario: Route whose name was never declared
 
-- **WHEN** a rule carries a tag belonging to a different instance
-- **THEN** the rule is preserved
+- **WHEN** a route exists for a hostname this plugin never managed
+- **THEN** the route is preserved, because no DNS record of its was pruned
 
-#### Scenario: Declared hostname spared
+### Requirement: Declared hosts are never pruned
 
-- **WHEN** a rule is tagged by this instance but its hostname is declared by the configuration
-- **THEN** the rule is preserved
+The plugin SHALL NOT delete a route for a hostname the configuration declares, even when that hostname appears in the pruned set for the same run.
 
-#### Scenario: Resolving hostname spared
+#### Scenario: Declared host survives a same-run DNS deletion
 
-- **WHEN** a rule is tagged by this instance, its hostname is undeclared, but a DNS record still exists at that name
-- **THEN** the rule is preserved and the plugin logs that it was spared because it resolves
+- **WHEN** a declared host's record was deleted in this run (for example because the host was reverted from a tunnel to an address) and the tunnel still holds its route
+- **THEN** the route is preserved and reconciled normally
 
-### Requirement: Prune never removes the catch-all
+#### Scenario: Declared host's drift is still corrected
 
-The plugin SHALL NOT delete the rule without a `hostname`, which terminates the configuration. Every written configuration SHALL still end with exactly one catch-all rule after pruning.
+- **WHEN** a declared host's route has a stale service
+- **THEN** the service is corrected as before, independently of pruning
 
-#### Scenario: Catch-all exempt
+### Requirement: The catch-all is never pruned
 
-- **WHEN** the plugin prunes rules from a tunnel
+The plugin SHALL NOT delete the rule that has no hostname. Every written configuration SHALL still end with exactly one catch-all rule after pruning.
+
+#### Scenario: Catch-all survives a prune
+
+- **WHEN** the plugin prunes routes from a tunnel
 - **THEN** the written configuration still ends with exactly one catch-all rule
 
-#### Scenario: Only the catch-all remains
+#### Scenario: Every host route pruned
 
-- **WHEN** every host-declared rule is eligible and the plugin prunes them all
-- **THEN** the write succeeds with a configuration containing only the catch-all
+- **WHEN** all of a tunnel's host routes are eligible and pruned
+- **THEN** the write leaves the catch-all as the only rule
 
-### Requirement: Prune fails closed when liveness is unknown
+### Requirement: Prune only reaches declared tunnels
 
-The plugin SHALL treat a hostname's liveness as unknown when the zone's DNS reconciliation did not complete in that run, and SHALL NOT prune rules for that zone in that run. Unknown liveness SHALL never be treated as "does not resolve".
+The plugin SHALL only prune routes on tunnels the configuration declares. When the configuration declares no tunnel at all, the plugin SHALL NOT enumerate the account's tunnels and SHALL instead log that the orphaned routes must be removed manually.
 
-#### Scenario: Zone DNS reconciliation failed
+#### Scenario: Tunnel still declared
 
-- **WHEN** a zone's DNS reconciliation fails and its tunnel has candidate rules
-- **THEN** no rule for that zone is deleted in that run
+- **WHEN** at least one host declares the tunnel UUID and another host's route is eligible
+- **THEN** that route is pruned
 
-#### Scenario: Prune resumes after a successful run
+#### Scenario: No tunnel declared
 
-- **WHEN** the zone's DNS reconciliation succeeds on a later run and the candidates are still eligible
-- **THEN** the rules are deleted then
+- **WHEN** the last tunnel host is removed from the config and its DNS record is pruned
+- **THEN** no tunnel is contacted and the plugin logs that the orphaned route needs manual removal
+
+#### Scenario: Unrelated tunnels untouched
+
+- **WHEN** the config declares one tunnel and the account contains others
+- **THEN** no request is made against the other tunnels
 
 ### Requirement: Prune is idempotent and auditable
 
-Pruning SHALL happen in the same read-modify-write as the plan, producing at most one write per tunnel. Every deletion SHALL be logged with the rule's hostname, service and the tag that authorised it. Every rule that was considered but spared SHALL be logged with the condition that spared it.
+Pruning SHALL occur within the same read-modify-write as the plan, producing at most one update per tunnel. Every pruned route SHALL be logged with its hostname and the fact that its DNS record was deleted in the same run.
 
 #### Scenario: Single write
 
-- **WHEN** a reconcile both updates the plan and prunes rules
+- **WHEN** a reconcile both updates the plan and prunes routes
 - **THEN** exactly one update request is issued for that tunnel
 
 #### Scenario: Second run is a no-op
 
-- **WHEN** a reconcile follows one that already pruned the eligible rules
+- **WHEN** a reconcile follows one that already pruned the eligible routes
 - **THEN** no update request is issued
 
-#### Scenario: Deletion is logged with its evidence
+#### Scenario: Deletion is logged with its cause
 
-- **WHEN** a rule is pruned
-- **THEN** the log entry carries its hostname, its service, the instance tag, and the fact that no DNS record existed
-
-#### Scenario: Spared rule is logged with its reason
-
-- **WHEN** a rule looks like a candidate but is spared
-- **THEN** the log entry names the condition that spared it (not tagged, declared, or still resolving)
+- **WHEN** a route is pruned
+- **THEN** the log entry names the hostname and states that its DNS record was pruned in the same run
