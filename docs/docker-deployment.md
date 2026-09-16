@@ -102,9 +102,8 @@ Notes and trade-offs:
 .
 ├── Caddyfile            # your config (mounted read-only)
 ├── .env                 # CF_API_TOKEN etc. (never committed)
-└── tunnel/              # only if you use Cloudflare Tunnels
-    ├── config.yml       # ingress rules (versionable)
-    └── <uuid>.json      # tunnel credentials (gitignored)
+└── (no tunnel/ dir)     # the tunnel is remotely-managed: ingress lives on
+                         # Cloudflare, written by the plugin or the dashboard
 ```
 
 `.env` (referenced with `{$VAR}` in the Caddyfile):
@@ -186,17 +185,11 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
-    # For a remotely-managed tunnel (dashboard): just the token.
-    # command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
-    #
-    # For a locally-managed tunnel: UUID + credentials file + ingress config.
-    command: >
-      tunnel --no-autoupdate
-      --config /etc/cloudflared/config.yml
-      --cred-file /etc/cloudflared/${CF_TUNNEL_ID}.json
-      run ${CF_TUNNEL_ID}
-    volumes:
-      - ./tunnel:/etc/cloudflared:ro
+    # Remotely-managed tunnel (recommended): just the token. Its ingress rules
+    # live on Cloudflare — written by the plugin when the Caddyfile declares
+    # `account`, or by you in the dashboard.
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    env_file: .env
     depends_on:
       - caddy
 
@@ -205,42 +198,50 @@ volumes:
   caddy_config:
 ```
 
-`tunnel/config.yml` (ingress rules; versionable — no secrets in it):
-
-```yaml
-ingress:
-  - hostname: app.example.com
-    service: http://caddy:80
-  # Required catch-all:
-  - service: http_status:404
-```
+No `tunnel/config.yml` and no credentials file are needed: a remotely-managed
+connector takes its identity from the token and ignores `--config`.
 
 Use the **service name** (`caddy`) as the origin host, not `localhost`: inside
 the compose network `localhost` is the cloudflared container itself.
 
-#### HTTPS origin with multiple hosts
+#### Letting the plugin write the ingress rules
 
-If Caddy redirects HTTP to HTTPS (the default), aiming at `:80` causes a
-redirect loop through the edge. Point the ingress at the HTTPS listener — and
-for more than one hostname, use `matchSNItoHost: true` so `cloudflared` sends
-each request's `Host` as SNI and Caddy presents the matching certificate:
+Declare the account credential and a default service, and the plugin maintains
+the tunnel's ingress plan alongside the DNS records:
 
-```yaml
-ingress:
-  # Dynamic: every declared subdomain reaches Caddy; add hosts in the
-  # Caddyfile only, no ingress edits needed.
-  - hostname: "*.example.com"
-    service: https://caddy:443
-    originRequest:
-      matchSNItoHost: true
-  # Required catch-all:
-  - service: http_status:404
+```
+{
+	cf_dns_manager {
+		zone example.com api_token {$CF_EXAMPLE}
+		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		tunnel_default_service https://caddy:443
+	}
+}
 ```
 
-Do **not** use a fixed `originServerName` with a wildcard or catch-all rule: it
-pins a single SNI and breaks every other host. A plain catch-all
-(`- service: https://caddy:443`) also works but routes hostnames you never
-declared to the plugin — scope it with the wildcard rule above. Full reference:
+The default becomes the tunnel's catch-all, so every declared subdomain reaches
+Caddy and **no wildcard DNS record is needed**. `matchSNItoHost` is not
+available through the plugin (it manages `hostname` and `service` only); if your
+origin needs a specific SNI behaviour, keep that rule hand-made and the plugin
+will preserve it as a foreign rule.
+
+> The account token can reconfigure **every** tunnel in the account. Omit the
+> `account` line to keep the plugin DNS-only — then maintain the ingress rules
+> yourself, in the dashboard or via the API.
+
+#### Hand-managed ingress (no `account` line)
+
+If you prefer to own the ingress rules, add the published hostnames in the
+dashboard. Note that the dashboard's **Published application** flow also creates
+the DNS record without the plugin's ownership tag, which the plugin will then
+neither update nor prune. Two ways to avoid that:
+
+- create the DNS record with the plugin (declare the host with `tunnel <uuid>`)
+  and add only the ingress rule in the dashboard; or
+- declare the host with `tunnel <uuid>` **and** give the plugin the `account`
+  credential, so it writes both halves itself.
+
+Full reference:
 [cloudflare-tunnel.md](cloudflare-tunnel.md#the-tunnel-ingress-configuration-cloudflared-side).
 
 The Caddyfile side is unchanged — the `tunnel` directive (see
@@ -285,8 +286,11 @@ To restart the stack:
 docker compose restart caddy
 ```
 
-> **Note:** editing a mounted file does not restart a running container. If you
-> change `tunnel/config.yml`, recreate the container so cloudflared reloads it:
+> **Note:** editing a mounted file does not restart a running container. That
+> does not matter for a remotely-managed tunnel: its ingress lives on Cloudflare
+> and `cloudflared` syncs it, so a Caddy reload is enough. Only if you run a
+> locally-managed tunnel (with a mounted `config.yml`) do you need to recreate
+> the connector so it reloads its file:
 >
 > ```bash
 > docker compose up -d --force-recreate cloudflared

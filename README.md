@@ -83,6 +83,17 @@ per-site directive can reference a host under it. Global settings live here too.
 		zone example.com     api_token {$CF_EXAMPLE}
 		zone otherdomain.com api_token {$CF_OTHER} prune
 
+		# account declares the account-scoped credential used to manage
+		# Cloudflare Tunnel ingress (optional; without it the plugin manages
+		# DNS only and never calls the Tunnel API). The token needs
+		# Account -> Cloudflare Tunnel -> Edit.
+		# account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+
+		# tunnel_default_service is the destination for tunnel traffic that no
+		# declared host claims: it becomes the tunnel's final catch-all rule.
+		# Unset, the plugin writes http_status:404 (fail closed).
+		# tunnel_default_service https://caddy:443
+
 		# ip_url overrides the public-IPv4 detection endpoint (optional;
 		# default: https://cloudflare.com/cdn-cgi/trace)
 		# ip_url https://ifconfig.me/ip
@@ -163,6 +174,55 @@ Subdirectives:
 | `ip6 false\|auto\|<ipv6>` | IPv6 mode, per host. `false` (default) manages no AAAA. `auto` manages an AAAA with the detected public IPv6. A literal IPv6 (e.g. a Tailscale ULA `fd7a:115c:a1e0::1`) manages an AAAA with that address. |
 | `proxied yes\|no` | Cloudflare proxied (orange cloud) or DNS-only. Default `yes`. Applies to both A and AAAA. A private/reserved IP always forces DNS-only for that family regardless. |
 | `force_adopt` | Update and claim an existing record that lacks the plugin's tag (otherwise untagged records are left untouched). Applies per family. |
+
+### 3. Cloudflare Tunnel hosts
+
+A tunnel-backed host is declared with `tunnel <uuid>` instead of `ip`/`ip6`
+(the two are mutually exclusive). The plugin then reconciles a proxied CNAME to
+`<uuid>.cfargotunnel.com`, and — if the global block declares `account` — also
+writes that hostname's ingress rule on the tunnel:
+
+```
+{
+	cf_dns_manager {
+		zone example.com api_token {$CF_EXAMPLE}
+		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		tunnel_default_service https://caddy:443
+	}
+}
+
+*.example.com {
+	tls {
+		dns cloudflare {$CF_EXAMPLE}
+	}
+
+	@git host git.example.com
+	handle @git {
+		cf_dns_manager {
+			host @git
+			tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
+			# tunnel_service ssh://caddy:22   # optional per-host destination
+		}
+		reverse_proxy localhost:3000
+	}
+}
+```
+
+The plugin writes one ingress rule per declared hostname plus a single catch-all
+carrying `tunnel_default_service`. Because that default is an ingress rule and
+not a DNS record, **no `*.<zone>` DNS record is needed** — undeclared subdomains
+simply do not resolve.
+
+| Subdirective | Description |
+| --- | --- |
+| `tunnel <uuid>` | Marks the host tunnel-backed. Mutually exclusive with `ip`, `ip6` and `proxied`. |
+| `tunnel_service <service>` | Optional ingress destination for this hostname, overriding `tunnel_default_service`. Requires `tunnel`. |
+
+Full walkthrough: [Configuring a Cloudflare Tunnel connection](docs/cloudflare-tunnel.md).
+Ingress management needs an extra, **account-scoped** token
+(`Account → Cloudflare Tunnel → Edit`); it is opt-in because that token can
+reconfigure every tunnel in the account. Omit the `account` line and the plugin
+manages DNS only, exactly as before.
 
 ## Policy
 

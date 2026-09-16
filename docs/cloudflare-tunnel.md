@@ -36,13 +36,18 @@ requests to your local service according to its ingress rules.
 - A `cloudflared` installation on the server. In Docker, the
   `cloudflare/cloudflared` image is enough.
 - The tunnel **UUID**. Every step below tells you where to find it.
+- For the plugin to manage ingress (recommended): an account-scoped token with
+  **Account → Cloudflare Tunnel → Edit**.
 
-## Step 1 — Create the tunnel
+> **Recommendation: use a remotely-managed tunnel.** Cloudflare recommends it
+> "for most use cases", and this plugin is designed around it. With a
+> remotely-managed tunnel the ingress configuration lives on Cloudflare, so the
+> plugin can write it, no local file needs reloading, and a change takes effect
+> without restarting `cloudflared`. Locally-managed tunnels are for local
+> development, testing, or legacy setups — see
+> [Locally-managed tunnels](#locally-managed-tunnels-not-recommended) below.
 
-Choose one of the two Cloudflare tunnel management modes. The DNS configuration
-in this guide is identical for both; only where the ingress rules live differs.
-
-### Option A — Remotely-managed (dashboard, recommended)
+## Step 1 — Create the tunnel (dashboard)
 
 1. In the Cloudflare dashboard go to **Networking > Tunnels** and select
    **Create a tunnel**.
@@ -56,108 +61,34 @@ in this guide is identical for both; only where the ingress rules live differs.
    cloudflared tunnel --no-autoupdate run --token <TOKEN>
    ```
 
-4. In the tunnel's **Routes** tab, add a **Published application**: enter the
-   hostname (e.g. `app.example.com`) and the local service URL (e.g.
-   `http://localhost:8080`). The dashboard can create the DNS route for you —
-   see the note in Step 3 if it does.
+4. Note the tunnel's **UUID** (shown on the tunnel's page).
 
-The ingress rules live in the dashboard for this mode.
+**Do not add a public hostname here.** The plugin writes the ingress plan; a
+hand-made published application would be preserved as a foreign rule instead of
+being replaced, and it also creates a DNS record without the plugin's ownership
+tag — which the plugin will never update or prune.
 
-### Option B — Locally-managed (`cloudflared` config file)
+Alternatively, create the tunnel with the API (`POST /accounts/{id}/cfd_tunnel`
+with `config_src: cloudflare`); see Cloudflare's "Create a tunnel (API)" guide.
+The token is available from the dashboard or `GET /accounts/{id}/cfd_tunnel/{id}/token`.
+
+### Locally-managed tunnels (not recommended)
+
+A locally-managed tunnel keeps its ingress in a `config.yml` on the host, and
+`cloudflared` is started with `--config`/`--cred-file` instead of `--token`:
 
 ```bash
 cloudflared tunnel login            # browser login, writes cert.pem
-cloudflared tunnel create my-server # prints the tunnel UUID
+cloudflared tunnel create my-server # prints the tunnel UUID and writes <UUID>.json
 ```
-
-`tunnel create` writes a credentials file named `<TUNNEL-UUID>.json` (default
-location `~/.cloudflared/`). Keep it secret; it authenticates this tunnel.
-
-#### Doing it with the Docker image (no host install)
-
-The same two commands work with the official container image — useful when the
-host has no `cloudflared` installed, and it is exactly how the test environment
-provisions its tunnel directory.
-
-Three details to know first:
-
-- `tunnel login` **always writes to the container user's home**,
-  `/home/nonroot/.cloudflared` — not to the path you happen to pass with `-v`.
-  So the setup mounts the host directory at `/home/nonroot/.cloudflared`, which
-  is where both `cert.pem` and `<UUID>.json` land.
-- The image runs as user `nonroot` (uid 65532, home `/home/nonroot`) and
-  resolves its home from `/etc/passwd`, **not** from `$HOME`. Running the
-  container with `--user <uid>` does **not** work for this: the uid has no
-  passwd entry and cloudflared cannot find its home. Use the image's default
-  user and make the mounted directory writable instead.
-- The directory must be **writable by uid 65532**. On the host, make it
-  world-writable for the setup (`chmod 777`) or `chown` it to 65532; the files
-  end up owned by 65532 but world-readable.
-
-From the directory that will hold the tunnel files (e.g. `./tunnel/`):
-
-```bash
-mkdir -p tunnel && chmod 777 tunnel
-
-# 1) Authorize against the account (writes cert.pem) — interactive, open the URL
-docker run -it --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared" \
-  cloudflare/cloudflared:latest tunnel login
-
-# 2) Create the tunnel (writes <TUNNEL-UUID>.json)
-docker run --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared" \
-  cloudflare/cloudflared:latest tunnel create my-server
-
-# 3) Read back the tunnel UUID (it is also the credentials filename)
-ls tunnel/*.json
-docker run --rm -v "$PWD/tunnel:/home/nonroot/.cloudflared:ro" \
-  cloudflare/cloudflared:latest tunnel list
-```
-
-> `tunnel login` writes the certificate **only after** you complete the browser
-> flow. Keep the command running until it prints `You have successfully logged
-> in`; if the container is removed early (or the mount is wrong) the cert is
-> lost and the next command fails with *Cannot determine default origin
-> certificate path* or *Cannot find a valid certificate*.
-
-After this, `tunnel/` contains:
-
-```
-tunnel/
-├── cert.pem            # account certificate (gitignore!)
-└── <TUNNEL-UUID>.json  # tunnel credentials   (gitignore!)
-```
-
-Both files must be kept secret (`cert.pem` can manage **all** tunnels in the
-account; the JSON can only run this one). Add them to `.gitignore`:
-
-```gitignore
-tunnel/cert.pem
-tunnel/*.json
-```
-
-Restore the directory permissions for day-to-day use and keep the runtime
-container read-only:
-
-```bash
-chmod 755 tunnel
-```
-
-Create the ingress rules file `tunnel/config.yml` (this one *is* versionable —
-no secrets in it):
 
 ```yaml
+# config.yml
 ingress:
   - hostname: app.example.com
-    service: http://caddy:80   # or https://caddy:443 — see the note below
-  # Required catch-all:
-  - service: http_status:404
+    service: http://caddy:80   # or https://caddy:443
+  - service: http_status:404   # required catch-all
 ```
-
-Then run the connector as a service (see
-[docker-deployment.md](docker-deployment.md#4-adding-a-cloudflare-tunnel) for a
-full compose example). Note the mount target changes from the setup commands:
-at runtime the same host directory is mounted at `/etc/cloudflared` and the
-credentials file is passed explicitly with `--cred-file`:
 
 ```bash
 docker run -d --name cloudflared --restart unless-stopped \
@@ -169,37 +100,47 @@ docker run -d --name cloudflared --restart unless-stopped \
     run <TUNNEL-UUID>
 ```
 
-The runtime container mounts the directory read-only: it reads the credentials
-(world-readable) but cannot write. Only the one-time `login`/`create` steps need
-write access to `tunnel/`.
+The plugin manages the DNS CNAME for such a tunnel exactly as for a remote one,
+but it **will not manage its ingress**: a write through the API would report
+success and change nothing, because the running `cloudflared` reads only its own
+file. The plugin logs an error naming this and skips the write, so you keep
+editing `config.yml` yourself. If you see that error, recreate the tunnel as
+remotely-managed (or drop the `account` block to silence it).
 
-> If your local service is Caddy itself and it redirects HTTP to HTTPS, point
-> the ingress at the HTTPS listener (`https://localhost:443`) with
-> `originRequest.originServerName` set to the hostname, or use
-> `originRequest.noTLSVerify` for a self-signed origin. Aiming at the plain
-> HTTP port of a redirecting origin causes a redirect loop through the edge.
+Keep `cert.pem` secret: it can create, delete and reconfigure **every** tunnel
+in the account, unlike the tunnel credentials file which only runs this one
+tunnel. Add both to `.gitignore`:
 
-In both options, note the tunnel UUID. Verify it with:
-
-```bash
-cloudflared tunnel list
+```gitignore
+tunnel/cert.pem
+tunnel/*.json
 ```
 
 ## Step 2 — Point the plugin at the tunnel
 
 Add the `tunnel` subdirective to the host's `cf_dns_manager` block. It takes the
-tunnel UUID:
+tunnel UUID. To let the plugin write the ingress rules too, add the
+account-scoped `account` line and a default service to the global block:
 
 ```
 {
 	cf_dns_manager {
-		zone example.com api_token {$CF_EXAMPLE}
+		zone example.com api_token {$CF_DNS_TOKEN}
+
+		# Account-scoped token (Account -> Cloudflare Tunnel -> Edit). Optional:
+		# without it the plugin manages DNS only and never calls the Tunnel API.
+		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+
+		# Destination for tunnel traffic no declared host claims. It becomes the
+		# tunnel's catch-all rule, so no wildcard DNS record is needed.
+		# Unset -> the plugin writes http_status:404 (fail closed).
+		tunnel_default_service https://caddy:443
 	}
 }
 
 *.example.com {
 	tls {
-		dns cloudflare {$CF_EXAMPLE}
+		dns cloudflare {$CF_DNS_TOKEN}
 	}
 
 	@app host app.example.com
@@ -207,7 +148,8 @@ tunnel UUID:
 		cf_dns_manager {
 			host @app
 			tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
-			# force_adopt   # only if a CNAME already exists untagged
+			# tunnel_service ssh://caddy:22   # optional per-host destination
+			# force_adopt                    # only if a CNAME already exists untagged
 		}
 		reverse_proxy localhost:8080
 	}
@@ -226,7 +168,25 @@ On reload the plugin:
 - creates a **proxied CNAME** `app.example.com → <uuid>.cfargotunnel.com`;
 - records it with the ownership tag, so it can update it on drift and prune it
   when you remove the declaration (in `prune`-enabled zones);
-- skips public-IP detection for this host entirely.
+- skips public-IP detection for this host entirely;
+- **writes the tunnel's ingress plan** (with the `account` line): one rule per
+  declared hostname, then the catch-all from `tunnel_default_service`.
+
+### The two halves of a tunnel host
+
+A tunnel host is complete only when both halves exist:
+
+```
+app.example.com ──CNAME──▶ <uuid>.cfargotunnel.com     (DNS, per host)
+app.example.com ──rule ──▶ https://caddy:443           (ingress, per host)
+       anything else ─────▶ https://caddy:443           (catch-all, no DNS record)
+```
+
+The plugin writes one rule per hostname you declare, plus a single catch-all.
+This is how the default route is expressed **without** a wildcard DNS record:
+the catch-all is an ingress concept with no DNS counterpart, so undeclared
+subdomains do not resolve at all. Add a host to the Caddyfile and it gets both
+halves automatically.
 
 ### Rules for the `tunnel` subdirective
 
@@ -237,6 +197,22 @@ On reload the plugin:
 - `force_adopt` is allowed and is how you adopt a CNAME that was created outside
   the plugin (for example by `cloudflared tunnel route dns`), which has no
   ownership tag.
+- `tunnel_service <service>` sets this hostname's ingress destination, overriding
+  the global `tunnel_default_service`. It requires `tunnel` in the same block.
+
+### Rules for the `account` and `tunnel_default_service` options
+
+- `account <account-id> api_token <token>` supplies the account-scoped
+  credential for the Tunnel API. Declared once in the global block; the account
+  id and token must be given together.
+- Without it, the plugin reconciles DNS only and logs that ingress management
+  needs the credential. Nothing else changes.
+- `tunnel_default_service <service>` accepts the same service values as
+  `tunnel_service`: `http`, `https`, `unix`, `unix+tls`, `tcp`, `ssh`, `rdp`,
+  `smb` URLs, or `http_status:<code>`.
+- The default is written as the tunnel's **final catch-all rule**. Because it
+  has no hostname, it creates no DNS record — that is what keeps undeclared
+  subdomains unresolvable.
 
 ## Step 3 — Verify
 
@@ -244,14 +220,24 @@ On reload the plugin:
 # DNS: the CNAME should resolve to Cloudflare's proxied addresses
 dig +short app.example.com
 
+# Ingress: the plugin's plan is on the tunnel
+#   dashboard: Networking > Tunnels > <tunnel> > Routes
+#   logs:      "wrote tunnel ingress plan"
+
 # End to end: through the tunnel to your local service
 curl -sS https://app.example.com/
+
+# The default route must NOT create a wildcard record: an undeclared
+# subdomain should not resolve. If it does, a wildcard DNS record exists and
+# was created outside the plugin (delete it).
+dig +short nothing-declared.example.com    # -> empty
 ```
 
-Check the Caddy log for the reconcile action:
+Check the Caddy log for the reconcile actions:
 
 ```
 cf_dns_manager  created record  {"host": "app.example.com", "record_type": "CNAME", "content": "<uuid>.cfargotunnel.com", "proxied": true}
+cf_dns_manager  wrote tunnel ingress plan  {"tunnel_id": "<uuid>", "rules": 2, "preserved_foreign_rules": 0, "catch_all_origin": "configured default"}
 ```
 
 If Cloudflare already had a hand-made CNAME for that hostname (no ownership
@@ -295,6 +281,13 @@ Delete the host's `cf_dns_manager` block (or the whole site block). On the next
 reload, in a zone declared with `prune`, the now-orphaned CNAME — carrying this
 instance's tag — is deleted. Without `prune`, the CNAME is left in place.
 
+The hostname's **ingress rule is not deleted.** Ingress rules carry no ownership
+tag (unlike DNS records), so the plugin cannot prove it wrote one and never
+deletes rules — otherwise it would destroy hand-made configuration on the first
+run. The leftover rule is inert: with the CNAME pruned, the hostname no longer
+resolves, so nothing reaches it. Remove it by hand in the dashboard if you want
+the Routes list tidy.
+
 The tunnel itself is not touched by the plugin; remove it separately with
 `cloudflared tunnel delete <name>` or from the dashboard.
 
@@ -305,33 +298,50 @@ The tunnel itself is not touched by the plugin; remove it separately with
 | Subdirective | Value | Notes |
 | --- | --- | --- |
 | `tunnel` | `<uuid>` | Marks the host tunnel-backed. Reconciles a proxied CNAME to `<uuid>.cfargotunnel.com`. |
+| `tunnel_service` | `<service>` | Optional. This hostname's ingress destination, overriding `tunnel_default_service`. Requires `tunnel`. |
 | `force_adopt` | — | Adopt an existing untagged CNAME (or an untagged A/AAAA blocking a switch). |
+
+Global options that affect tunnels:
+
+| Option | Value | Notes |
+| --- | --- | --- |
+| `account` | `<id> api_token <token>` | Account-scoped credential for the Tunnel API. Optional; without it the plugin never calls it. |
+| `tunnel_default_service` | `<service>` | The tunnel's catch-all destination. Defaults to `http_status:404`. |
 
 Notes:
 
 - One directive manages one host; repeat the directive for more tunnel hosts.
-  Multiple hosts can share the same tunnel UUID (add each to the ingress rules).
-- The plugin only manages the DNS routing record. Adding hostnames to the DNS
-  does not by itself route traffic: each hostname also needs a matching ingress
-  rule in the tunnel configuration.
+  Multiple hosts can share the same tunnel UUID — each becomes its own ingress
+  rule, so they may point at different services via `tunnel_service`.
+- With the `account` line, the plugin manages both halves: the CNAME (per host)
+  and the ingress rule (per host), plus the tunnel's catch-all.
+- Ingress rules the plugin did not derive from your config are preserved
+  untouched. A preserved wildcard rule that also matches a declared hostname
+  produces a warning, because rule order then decides the destination.
 
 ### The tunnel ingress configuration (`cloudflared` side)
 
-The plugin manages DNS; `cloudflared` decides *where* each hostname goes. That
-mapping lives in the tunnel configuration — the locally-managed `config.yml` or
-the dashboard for a remotely-managed tunnel. Two hard rules:
+Every tunnel decides *where* each hostname goes, through its ingress rules. With
+a remotely-managed tunnel those rules are stored on Cloudflare — and with the
+`account` credential, written by this plugin. With a locally-managed tunnel they
+live in the `config.yml` you maintain yourself.
 
-1. **A config file must exist.** A locally-managed tunnel with an empty config
+Two hard rules either way:
+
+1. **An ingress list must exist.** A locally-managed tunnel with an empty config
    fails: *"No configuration file was found"*. The `ingress` key is mandatory
    (it is the only thing you need — `tunnel:` and `credentials-file:` can come
-   from the command line as shown above).
+   from the command line as shown above). The plugin always writes a valid list.
 2. **The last rule must be a catch-all** (no `hostname`, no `path`). Validation
-   fails otherwise: *"The last ingress rule must match all URLs"*.
+   fails otherwise: *"The last ingress rule must match all URLs"*. The plugin
+   always emits one, from `tunnel_default_service` or the `http_status:404`
+   fallback.
 
 #### Minimal config (all hostnames → one Caddy)
 
 If Caddy serves every hostname (routing by `Host`), a single catch-all rule is
-enough. This is the dynamic setup: **add a host to the plugin and it works —
+enough — and if you let the plugin manage ingress, that is exactly what you get
+for free. This is the dynamic setup: **add a host to the plugin and it works —
 no ingress changes.**
 
 ```yaml
