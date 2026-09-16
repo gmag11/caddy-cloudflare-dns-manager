@@ -8,6 +8,7 @@ Cloudflare API. Not part of the published module.
 ```
 testenv/
 ├── Caddyfile            # Caddy config under test (normal + tunnel hosts)
+├── create-tunnel.sh     # provisions the harness tunnel, fills .env
 ├── docker-compose.yml   # caddy + cloudflared services
 ├── Dockerfile           # builds Caddy with the plugin via xcaddy
 └── .env                 # secrets/config (gitignored; copy .env.example)
@@ -39,7 +40,8 @@ resolve at all.
 
    ```bash
    cp testenv/.env.example testenv/.env
-   # edit: CF_API_TOKEN, CF_ACCOUNT_TUNNEL_TOKEN, CF_TUNNEL_*, CF_ZONE, CF_INSTANCE
+   # edit: CF_API_TOKEN, CF_ACCOUNT_TUNNEL_TOKEN, CF_ZONE, CF_INSTANCE
+   # then run testenv/create-tunnel.sh to fill CF_TUNNEL_TOKEN / CF_TUNNEL_ID
    ```
 
    `CF_API_TOKEN` is **zone-scoped** (`Zone → DNS → Edit`) and drives the DNS
@@ -49,17 +51,43 @@ resolve at all.
    optional credential. The account id is not configured: the plugin derives it
    from the zone lookup.
 
-2. Create the tunnel (one-time, in the dashboard — no local credentials file
-   is involved):
+2. Create the tunnel (one-time):
 
-   1. **Networking → Tunnels → Create a tunnel → Cloudflared**, name it
-      (e.g. `cfdns-test`) and save.
-   2. Copy the **run token** shown into `CF_TUNNEL_TOKEN`.
-   3. Copy the **tunnel UUID** (visible on the tunnel's page) into
-      `CF_TUNNEL_ID`.
+   ```bash
+   testenv/create-tunnel.sh
+   ```
 
-   Do **not** add a public hostname to the tunnel in the dashboard: the plugin
-   writes the ingress plan, and a hand-made rule would be preserved as a
+   The script creates a remotely-managed tunnel named after `CF_INSTANCE` and
+   writes both `CF_TUNNEL_TOKEN` and `CF_TUNNEL_ID` back into `.env`. It runs
+   only when those two values are unconfigured, so it is safe to call
+   unconditionally: with a provisioned harness it reports so and exits 0, and
+   with exactly one of the two unconfigured it refuses and creates nothing,
+   because the set half already belongs to some tunnel.
+
+   **Blank the two lines before the first run.** The template ships
+   `CF_TUNNEL_TOKEN=replace-me` and an all-zero `CF_TUNNEL_ID`, and those
+   placeholders count as configured — the script only acts on an unambiguous
+   empty value, never on a guess about what looks like a placeholder. With the
+   placeholders still in place it prints the two lines to blank and exits 0
+   without creating anything:
+
+   ```dotenv
+   CF_TUNNEL_TOKEN=
+   CF_TUNNEL_ID=
+   ```
+
+   It derives the account id from `CF_ZONE` with the zone-scoped `CF_API_TOKEN`
+   (the same derivation the plugin uses), and does the creating with the
+   account-scoped `CF_ACCOUNT_TUNNEL_TOKEN`. The run token never reaches
+   stdout, so nothing sensitive lands in the terminal scrollback.
+
+   *Alternatively, by hand:* **Networking → Tunnels → Create a tunnel →
+   Cloudflared**, then copy the shown run token into `CF_TUNNEL_TOKEN` and the
+   tunnel UUID into `CF_TUNNEL_ID`.
+
+   Either way, do **not** add a public hostname to the tunnel in the dashboard:
+   the plugin writes the ingress plan, and a hand-made rule would be preserved
+   as a
    foreign rule rather than replaced.
 
 ## Run
