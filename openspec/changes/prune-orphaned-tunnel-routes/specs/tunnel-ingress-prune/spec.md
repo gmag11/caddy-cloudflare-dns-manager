@@ -19,16 +19,21 @@ The plugin SHALL delete an orphaned tunnel ingress route only when the zone that
 - **WHEN** one zone declares `prune` and another does not, and both own an eligible route
 - **THEN** only the route whose hostname belongs to the opted-in zone is deleted
 
-### Requirement: A route is eligible only when its DNS record was pruned in the same run
+### Requirement: A route is eligible only when its DNS record was deleted in the same run
 
-The plugin SHALL delete an ingress route only when its hostname is one whose DNS record the plugin deleted during the same reconcile. Any other route SHALL be preserved, whatever its declaration state or DNS state.
+The plugin SHALL delete an ingress route only when its hostname is one whose DNS record the plugin deleted during the same reconcile, whether by the per-zone prune or by the CNAME cleanup that accompanies a host being switched from tunnel-backed to an address host. Any other route SHALL be preserved, whatever its declaration state or DNS state.
 
 #### Scenario: DNS record pruned in this run
 
-- **WHEN** the DNS prune deletes the record for `gone.example.com` and the tunnel holds a route for that hostname
+- **WHEN** the prune deletes the record for `gone.example.com` and the tunnel holds a route for that hostname
 - **THEN** the route is deleted in the same reconcile
 
-#### Scenario: DNS record not pruned
+#### Scenario: Host reverted from tunnel to address
+
+- **WHEN** a host that declared `tunnel <uuid>` is re-declared with `ip`, so its CNAME is deleted to make room for the address record
+- **THEN** the route for that hostname is deleted in the same reconcile
+
+#### Scenario: DNS record not deleted
 
 - **WHEN** a route is not declared by the config but its hostname's DNS record was not deleted in this run
 - **THEN** the route is preserved
@@ -36,7 +41,21 @@ The plugin SHALL delete an ingress route only when its hostname is one whose DNS
 #### Scenario: Route whose name was never declared
 
 - **WHEN** a route exists for a hostname this plugin never managed
-- **THEN** the route is preserved, because no DNS record of its was pruned
+- **THEN** the route is preserved, because no DNS record of its was deleted
+
+### Requirement: Route deletion obeys the prune opt-in even on a revert
+
+Deleting the DNS record that accompanies a tunnel-to-address revert SHALL NOT depend on the `prune` opt-in, because Cloudflare forbids a CNAME coexisting with an address record. Deleting the corresponding route SHALL depend on it, like every other route deletion.
+
+#### Scenario: Revert without the opt-in
+
+- **WHEN** a host is reverted from tunnel-backed to an address host and the zone has not declared `prune`
+- **THEN** the CNAME is deleted, the address record is created, and the route is preserved
+
+#### Scenario: Revert with the opt-in
+
+- **WHEN** the same revert happens in a zone that declared `prune`
+- **THEN** both the CNAME and the route are deleted
 
 ### Requirement: Declared hosts are never pruned
 

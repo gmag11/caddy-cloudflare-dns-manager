@@ -195,12 +195,17 @@ it is not an inference.
 ```
 DNS phase (per zone)                    ingress phase (per tunnel)
 ────────────────────                    ──────────────────────────
-pruneZone deletes an owned record   →   the deleted hostname set
-  and returns the hostnames             feeds mergeIngressPlan:
-                                          ├─ declared by config → keep
-                                          ├─ in the pruned set  → delete
-                                          └─ otherwise          → preserve
+record deleted for a hostname  →        the deleted hostname set
+  ├─ pruneZone (owned orphan)             feeds mergeIngressPlan:
+  └─ clearConflictingRecords               ├─ declared by config → keep
+     (tunnel → address revert)             ├─ in the deleted set  → delete
+  returns the names                        └─ otherwise          → preserve
 ```
+
+Both deletion paths report what they removed, and the route deletion is gated
+on the zone's `prune` even when the record deletion was not: a revert must
+remove the CNAME because Cloudflare forbids it coexisting with an address
+record, but deleting the route stays a cleanup decision the operator opts into.
 
 An earlier design wrote `<tag_prefix>:<instance>` into each rule's
 `description`, mirroring the DNS comment. That was abandoned after verifying

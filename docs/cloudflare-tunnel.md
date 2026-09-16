@@ -293,8 +293,10 @@ plugin just made it dead.
 
 Two cases leave the route in place, both inert:
 
-- **The hostname's record was not pruned** (the zone has no `prune`, or the name
-  still resolves). The route is preserved.
+- **The hostname's record was not deleted** (the zone has no `prune`). The route
+  is preserved. In particular, switching a host from `tunnel` to `ip` always
+  deletes the CNAME — Cloudflare forbids it coexisting with an address record —
+  but the route is only cleaned up when the zone opted into `prune`.
 - **This was the last tunnel host of the config.** With no tunnel declared the
   plugin cannot tell which one holds the route, and it will not scan the
   account's tunnels. It logs that manual removal is needed; the route is inert
@@ -334,7 +336,8 @@ Notes:
 - **Route cleanup follows the DNS record.** In a zone declared with `prune`,
   when the plugin deletes the record that made a tunnel hostname reachable, it
   deletes that hostname's route in the same reconcile: the route can no longer
-  receive traffic, so nothing is inferred. A route whose record still exists is
+  receive traffic, so nothing is inferred. This covers both removing a host and
+  switching one from `tunnel` to `ip`. A route whose record still exists is
   never touched, and a declared host's route is never removed.
 - **Removing the last tunnel host leaves its route behind.** With no tunnel
   declared, the plugin cannot tell which tunnel holds the route, and it will not

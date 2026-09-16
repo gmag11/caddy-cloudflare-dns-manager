@@ -11,8 +11,9 @@ The DNS side already has the answer. When `prune` deletes a CNAME that pointed a
 ## What Changes
 
 - **Remove** the ownership-tag mechanism from ingress rules: stop writing `description`, stop treating it as drift, and inherit it from the operator like any other unmanaged field.
-- Prune a tunnel route when **this run's DNS prune deleted the record that made its hostname reachable**. The route deletion and the DNS deletion happen in one reconcile.
+- Prune a tunnel route when **this run deleted the record that made its hostname reachable**. That happens in two places, both covered: the per-zone DNS prune removing an undeclared orphan, and the CNAME cleanup performed when a host is switched from tunnel-backed to an address host. Either way the route's hostname stops resolving in the same reconcile.
 - A route is never pruned for any other reason: an undeclared route whose DNS record still exists is preserved, however stale it looks.
+- The route deletion still obeys the per-zone `prune` opt-in. Deleting the DNS record on a revert is not optional (Cloudflare forbids a CNAME coexisting with A/AAAA), but deleting the *route* is a cleanup decision, so `prune` remains the single switch for "this plugin may delete my routes". Without it a reverted host keeps a stale route, which the docs cover.
 - A declared host's route is never a prune candidate, even if its DNS record changed type in the same run.
 - The catch-all is never removed; the reconciler always re-emits it, so a written configuration stays valid.
 - Prune runs under the existing per-zone `prune` opt-in — no new directive.
@@ -31,7 +32,7 @@ The DNS side already has the answer. When `prune` deletes a CNAME that pointed a
 
 ## Impact
 
-- **Code**: `tunnelingress.go` (drop the tag from the plan, drift and derive signature; `mergeIngressPlan` gains the pruned-name set and reports what it dropped), `reconcile.go` (`pruneZone` returns the hostnames it deleted, `reconcileZone` propagates them, the ingress phase applies them).
+- **Code**: `tunnelingress.go` (drop the tag from the plan, drift and derive signature; `mergeIngressPlan` gains the pruned-name set and reports what it dropped), `reconcile.go` (`pruneZone` and `clearConflictingRecords` return the hostnames whose CNAME they deleted, `reconcileZone` propagates them behind the `prune` opt-in, the ingress phase applies them).
 - **Removed**: the `description` write path and its drift check. Rules tagged by an earlier build keep their tag until a rewrite, at which point the field is inherited like any other unmanaged field; nothing is actively cleaned up and nothing breaks.
 - **Tests**: the tag-semantics tests are replaced by DNS-correlation tests, including the negative cases (nothing pruned → nothing deleted, declared host → never deleted, catch-all → never removed).
 - **Docs**: `docs/cloudflare-tunnel.md`, `docs/troubleshooting.md`, `docs/architecture.md`, `README.md`.

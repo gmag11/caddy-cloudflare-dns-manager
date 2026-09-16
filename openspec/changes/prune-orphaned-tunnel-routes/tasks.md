@@ -13,6 +13,8 @@
 - [x] 2.3 Collect the pruned hostnames per zone in `Reconcile` next to `accountByZone`, and pass the flattened set into `reconcileIngressPhase`
 - [x] 2.4 Flatten the per-zone sets to a single lowercased hostname set in the ingress phase, since route matching is zone-agnostic
 - [x] 2.5 Confirm a zone whose DNS reconcile failed contributes no pruned names, so its routes are never candidates
+- [x] 2.6 Have `clearConflictingRecords` report whether it deleted a CNAME, and feed those hostnames into the same set behind the `prune` opt-in, so a tunnel-to-address revert cleans up its route too
+- [x] 2.7 Test the revert in both modes: with `prune` the CNAME and the route are both gone, without it the CNAME goes and the route stays
 
 ## 3. Prune in the ingress phase
 

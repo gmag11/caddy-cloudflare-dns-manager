@@ -37,22 +37,38 @@ Relevant existing code:
 
 ### D1: Eligibility is a DNS event, not an inferred property
 
-A route is deleted only when its hostname is in the set of names `pruneZone` deleted during this same run, and the route is not declared by the configuration.
+A route is deleted only when its hostname is in the set of names whose record this same run deleted, and the route is not declared by the configuration.
 
 ```
 DNS phase                          ingress phase
 ─────────                          ─────────────
-pruneZone deletes                  route for that hostname?
-  CNAME foo → tunnel                 ├─ declared by config  → keep (and reconcile)
-  returns ["foo.example.com"]        ├─ in the pruned set   → delete
-                                     └─ otherwise           → keep
+record deleted for foo             route for foo?
+  ├─ by pruneZone (orphan)           ├─ declared by config  → keep (and reconcile)
+  └─ by clearConflictingRecords      ├─ in the deleted set  → delete
+     (tunnel → address revert)       └─ otherwise           → keep
+  returns ["foo.example.com"]
 ```
 
-*Rationale*: this is strictly stronger than the tag approach. It needs no ownership claim about the route, so it cannot misfire on a route the operator wrote by hand — if their DNS record was not pruned, their route is untouched. It also cannot drift out of sync with reality, because the signal is produced by the plugin's own action moments earlier rather than read back from a field the UI may have cleared.
+Two code paths delete a record, and both feed the same set:
+
+- `pruneZone` removes an owned orphan whose `(name, type)` the config no longer manages.
+- `clearConflictingRecords` removes the owned CNAME when a host is re-declared as an address host, because Cloudflare forbids a CNAME coexisting with A/AAAA.
+
+The revert case matters because the CNAME disappears there rather than in the prune pass, so a design that only watched `pruneZone` would leave that route behind forever: the hostname no longer points at the tunnel, so no later prune would ever see it again.
+
+*Rationale*: this is strictly stronger than the tag approach. It needs no ownership claim about the route, so it cannot misfire on a route the operator wrote by hand — if their DNS record was not deleted, their route is untouched. It also cannot drift out of sync with reality, because the signal is produced by the plugin's own action moments earlier rather than read back from a field the UI may have cleared.
 
 *Alternative rejected*: tag + undeclared (mirroring DNS prune). It depends on the field described in Context, and it deletes routes that may still resolve.
 
 *Alternative rejected*: tag + undeclared + no DNS record. This is what the first draft proposed. It is safe, but it still hinges on the tag, so a route edited in the dashboard becomes permanently ineligible — the plugin could never clean up the very routes most likely to be stale.
+
+### D1b: The record deletion is mandatory, the route deletion is not
+
+A revert deletes the CNAME whether or not the zone opted into `prune`: the record must go or Cloudflare rejects the address record. The **route** deletion is gated on `prune` like every other route deletion.
+
+*Rationale*: `prune` is the operator's single switch for "this plugin may delete my routes". Carving out an implicit exception — deleting on a revert but not on an orphan — would make the switch unreliable exactly where it is least expected, and would be harder to document than the alternative. Consistency is worth more here than covering the last case automatically.
+
+*Consequence*: without `prune`, switching a host from tunnel to address leaves a stale route that no future run will clean up, because the hostname no longer points at the tunnel. Documented in troubleshooting, with the manual remedy.
 
 ### D2: A declared host is never a prune candidate
 

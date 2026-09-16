@@ -155,15 +155,21 @@ and keep maintaining `config.yml` yourself.
 
 ### A removed host still appears in the tunnel's Routes
 
-Expected in two cases. The plugin removes a route automatically only when it
-also deletes that hostname's DNS record in the same run:
+Expected in these cases. The plugin removes a route automatically only when it
+also deletes that hostname's DNS record in the same run, and only in a
+`prune`-enabled zone:
 
+- **The zone has no `prune`.** Nothing is deleted, so there is nothing to
+  correlate with. Enable `prune` on the zone and reload.
+- **The host was switched from `tunnel` to `ip` without `prune`.** The CNAME had
+  to go — Cloudflare forbids it coexisting with an address record — but the
+  route is only cleaned up under `prune`. It is now unreachable (the name
+  resolves to your address, not through the tunnel) and no later run will touch
+  it, so delete it by hand if it bothers you.
 - **This was the last tunnel host of the config.** With no tunnel declared the
   plugin cannot tell which tunnel holds the route, and it will not scan the
-  account's tunnels to find out. The log says so explicitly. The route is inert:
-  the hostname no longer resolves. Delete it by hand in the dashboard.
-- **The zone has no `prune`.** Nothing was deleted, so there was nothing to
-  correlate with. Enable `prune` on the zone and reload.
+  account's tunnels to find out; the log says so explicitly. Delete it by hand
+  in the dashboard.
 
 ### A route was pruned and I want it back
 

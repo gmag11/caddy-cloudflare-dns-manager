@@ -314,6 +314,12 @@ func (app *App) reconcileZone(
 
 	tag := app.ownershipTag()
 
+	// clearedNames collects hostnames whose CNAME this pass deleted to make
+	// room for address records (a tunnel-to-address revert). Those routes can
+	// no longer receive traffic, so they join the prune set the ingress phase
+	// consumes.
+	var clearedNames []string
+
 	for _, hc := range hosts {
 		name := recordName(hc.Host, zone)
 		key := canonicalNameKey(name, zone)
@@ -338,12 +344,20 @@ func (app *App) reconcileZone(
 		// rejected with code 81054) and prune only removes the CNAME
 		// afterwards, leaving the name with no record.
 		var clearErr error
-		records, clearErr = app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+		var clearedCNAME bool
+		records, clearedCNAME, clearErr = app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
 			"address records", map[string]bool{"CNAME": true}, records, tag)
 		if clearErr != nil {
 			app.logger.Error("reconcile host failed",
 				zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "CNAME"), zap.Error(clearErr))
 			continue
+		}
+		// Reverting a host from tunnel-backed to an address host deletes the
+		// CNAME here rather than in the prune pass. The route it served is now
+		// unreachable, so report the name the same way prune does and let the
+		// ingress phase clean it up.
+		if clearedCNAME {
+			clearedNames = append(clearedNames, hc.Host)
 		}
 
 		// A is always managed for a declared host.
@@ -375,14 +389,23 @@ func (app *App) reconcileZone(
 		}
 	}
 
+	// Names whose CNAME was deleted to make room for address records are only
+	// reported when the zone opted into prune. Deleting the *record* is not
+	// optional — Cloudflare forbids a CNAME coexisting with A/AAAA, so a revert
+	// must remove it — but deleting the *route* is a cleanup decision, and
+	// `prune` is the operator's single switch for "this plugin may delete my
+	// routes". Without it the route is left in place and goes stale, which is
+	// documented in troubleshooting.
 	var prunedNames []string
 	if app.zonePruneEnabled(zone) {
 		names, err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag)
+		// Report whatever was pruned before a failure, plus the cleared names,
+		// so the ingress phase still cleans up routes whose records are gone.
+		prunedNames = append(names, clearedNames...)
 		if err != nil {
-			return reconcileZoneResult{accountID: accountID, prunedHosts: names},
+			return reconcileZoneResult{accountID: accountID, prunedHosts: prunedNames},
 				fmt.Errorf("zone %q: prune: %v", zone, err)
 		}
-		prunedNames = names
 	}
 	return reconcileZoneResult{accountID: accountID, prunedHosts: prunedNames}, nil
 }
@@ -416,7 +439,9 @@ func (app *App) reconcileTunnelHost(
 	// Clear address records that would block CNAME creation. Owned records are
 	// deleted unconditionally; untagged ones require force_adopt (adoption of
 	// the name), otherwise the CNAME cannot be created and the user is told.
-	kept, err := app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+	// A deleted CNAME is not possible here (CNAME is not in the blocking set),
+	// so the flag is discarded.
+	kept, _, err := app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
 		"tunnel CNAME", map[string]bool{"A": true, "AAAA": true}, records, tag)
 	if err != nil {
 		return kept, err
@@ -444,8 +469,13 @@ func (app *App) reconcileTunnelHost(
 // records are deleted unconditionally; untagged ones are only deleted when
 // force_adopt is set, otherwise an error is returned (and the named records
 // are left untouched). desiredType only labels log messages. It returns the
-// records snapshot with deleted entries removed so a later prune does not
-// retry those deletions.
+// records snapshot with deleted entries removed (so a later prune does not
+// retry those deletions) and whether it deleted a CNAME at that name.
+//
+// The CNAME flag is what tells the ingress phase that the route for this
+// hostname can no longer receive traffic: switching a host from tunnel to
+// address records removes the CNAME here, not in the prune pass, so the
+// correlation has to travel back the same way the pruned-name set does.
 func (app *App) clearConflictingRecords(
 	ctx context.Context,
 	cli *cloudflareClient,
@@ -455,10 +485,10 @@ func (app *App) clearConflictingRecords(
 	blockingTypes map[string]bool,
 	records []cfDNSRecord,
 	tag string,
-) ([]cfDNSRecord, error) {
+) (kept []cfDNSRecord, deletedCNAME bool, err error) {
 	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone))
 
-	kept := make([]cfDNSRecord, 0, len(records))
+	kept = make([]cfDNSRecord, 0, len(records))
 	var blocked error
 	for i := range records {
 		r := &records[i]
@@ -484,12 +514,15 @@ func (app *App) clearConflictingRecords(
 			kept = append(kept, *r)
 			continue
 		}
+		if r.Type == "CNAME" {
+			deletedCNAME = true
+		}
 		log.Info("deleted conflicting record to make room for the desired type",
 			zap.String("record_id", r.ID), zap.String("record_type", r.Type),
 			zap.String("content", r.Content), zap.String("desired", desiredType),
 			zap.String("fqdn", hc.Host))
 	}
-	return kept, blocked
+	return kept, deletedCNAME, blocked
 }
 
 // reconcileFamily handles a single (host, record type) pair against its
