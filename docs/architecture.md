@@ -158,8 +158,10 @@ Reconcile(hosts)
    └─ resolve account: explicit account_id, else a resolved zone's account
       └─ per tunnel (goroutine):
          ├─ GET  /accounts/{id}/cfd_tunnel/{id}/configurations
-         ├─ derive plan    → declared hosts sorted by FQDN, catch-all last
-         ├─ merge          → preserve foreign rules, replace declared ones
+         ├─ derive plan    → declared host rules sorted by FQDN + instance tag,
+         │                    catch-all last
+         ├─ merge          → preserve foreign rules, replace declared ones,
+         │                    inherit path/originRequest from the existing rule
          └─ PUT (only on drift)
 ```
 
@@ -181,17 +183,26 @@ document. Dropping `warp-routing` would silently break private-network access.
 (adding an empty `originRequest`, bumping `version`), so a deep comparison would
 write on every reload. This is the phase's idempotence guarantee.
 
-### Why ingress rules are never deleted
+### Why ingress rules are tagged but never deleted
 
-DNS records carry an ownership tag, so the plugin can tell its own from someone
-else's. Ingress rules have **no such field**. A rule in the tunnel's
-configuration is indistinguishable from one made by hand in the dashboard, so
-"delete everything undeclared" would destroy configuration the plugin never
-owned — precisely the failure the DNS ownership model exists to prevent.
+DNS records carry an ownership tag in their comment, so the plugin can tell its
+own from someone else's. Ingress rules have a `description` field that accepts
+the same marker, and the plugin writes `<tag_prefix>:<instance>` into every rule
+it authors — the tag is part of the derived plan and participates in drift
+detection, so a rule that loses its tag is corrected.
+
+**The tag is not used for deletion.** Writing it does not make deletion safe:
+a description is an ordinary editable field, so a mistaken copy or a hand-typed
+value would be indistinguishable from a genuine tag, and acting on it would mean
+deleting a route that serves live traffic. The plugin therefore removes nothing,
+and a rule whose host is no longer declared stays on the tunnel until a human
+deletes it.
 
 The consequence is accepted and documented: removing a host leaves its ingress
 rule behind. The rule is inert because the DNS record is pruned at the same
-time, so the hostname stops resolving. Deleting the rule stays a human decision.
+time, so the hostname stops resolving. An ingress prune is a natural follow-up
+now that the data exists, but it needs its own design — the failure mode of
+deleting the wrong rule is worse than leaving an inert orphan.
 
 ### Authorization boundary
 

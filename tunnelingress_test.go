@@ -13,6 +13,8 @@ import (
 const (
 	testTunnelA = "8a7f3c2e-1234-4567-89ab-cdef01234567"
 	testTunnelB = "1b2c3d4e-5678-49ab-9cde-f01234567890"
+	// testTag is the ownership marker written into rule descriptions.
+	testTag = "caddy-cf-dns:test-host"
 )
 
 // --- Group 3: plan derivation and merge -------------------------------------
@@ -22,7 +24,7 @@ func TestDeriveIngressPlanOneRulePerHost(t *testing.T) {
 		{Host: "git.example.com", TunnelID: testTunnelA},
 		{Host: "ha.example.com", TunnelID: testTunnelA},
 	}
-	plans := deriveIngressPlan(hosts, "https://caddy:443")
+	plans := deriveIngressPlan(hosts, "https://caddy:443", testTag)
 
 	rules := plans[testTunnelA]
 	if len(rules) != 3 {
@@ -51,12 +53,12 @@ func TestDeriveIngressPlanDeterministicOrder(t *testing.T) {
 		{Host: "alpha.example.com", TunnelID: testTunnelA},
 		{Host: "mid.example.com", TunnelID: testTunnelA},
 	}
-	first := deriveIngressPlan(hosts, "")[testTunnelA]
+	first := deriveIngressPlan(hosts, "", testTag)[testTunnelA]
 
 	// Reversed input must yield the identical order: hosts accumulate from
 	// concurrent handler Provision calls, so input order is not stable.
 	reversed := []HostConfig{hosts[2], hosts[1], hosts[0]}
-	second := deriveIngressPlan(reversed, "")[testTunnelA]
+	second := deriveIngressPlan(reversed, "", testTag)[testTunnelA]
 
 	if len(first) != len(second) {
 		t.Fatalf("rule counts differ: %d vs %d", len(first), len(second))
@@ -76,7 +78,7 @@ func TestDeriveIngressPlanPerTunnelIndependence(t *testing.T) {
 		{Host: "a.example.com", TunnelID: testTunnelA},
 		{Host: "b.example.com", TunnelID: testTunnelB},
 	}
-	plans := deriveIngressPlan(hosts, "")
+	plans := deriveIngressPlan(hosts, "", testTag)
 
 	for _, tc := range []struct{ tunnel, want string }{
 		{testTunnelA, "a.example.com"},
@@ -97,7 +99,7 @@ func TestDeriveIngressPlanPerHostOverride(t *testing.T) {
 		{Host: "git.example.com", TunnelID: testTunnelA, TunnelService: "ssh://caddy:22"},
 		{Host: "ha.example.com", TunnelID: testTunnelA},
 	}
-	rules := deriveIngressPlan(hosts, "https://caddy:443")[testTunnelA]
+	rules := deriveIngressPlan(hosts, "https://caddy:443", testTag)[testTunnelA]
 
 	byHost := map[string]string{}
 	for _, r := range rules {
@@ -119,7 +121,7 @@ func TestDeriveIngressPlanSkipsNonTunnelHosts(t *testing.T) {
 		{Host: "plain.example.com"},
 		{Host: "git.example.com", TunnelID: testTunnelA},
 	}
-	plans := deriveIngressPlan(hosts, "")
+	plans := deriveIngressPlan(hosts, "", testTag)
 	if len(plans) != 1 {
 		t.Fatalf("got %d tunnel plans, want 1", len(plans))
 	}
@@ -131,15 +133,34 @@ func TestDeriveIngressPlanSkipsNonTunnelHosts(t *testing.T) {
 func TestDeriveIngressPlanFailClosedDefault(t *testing.T) {
 	rules := deriveIngressPlan([]HostConfig{
 		{Host: "git.example.com", TunnelID: testTunnelA},
-	}, "")[testTunnelA]
+	}, "", testTag)[testTunnelA]
 
 	if rules[len(rules)-1].Service != defaultTunnelService {
 		t.Errorf("catch-all = %q, want fail-closed %q", rules[len(rules)-1].Service, defaultTunnelService)
 	}
 }
 
+// TestDeriveIngressPlanTagsEveryRule covers the ownership marker: every rule
+// the plugin authors carries the instance tag in its description, the ingress
+// counterpart of the comment written on DNS records.
+func TestDeriveIngressPlanTagsEveryRule(t *testing.T) {
+	rules := deriveIngressPlan([]HostConfig{
+		{Host: "git.example.com", TunnelID: testTunnelA},
+		{Host: "ha.example.com", TunnelID: testTunnelA},
+	}, "", testTag)[testTunnelA]
+
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want 3", len(rules))
+	}
+	for i, r := range rules {
+		if r.Description != testTag {
+			t.Errorf("rule %d description = %q, want the ownership tag %q", i, r.Description, testTag)
+		}
+	}
+}
+
 func TestDeriveIngressPlanEmptyConfig(t *testing.T) {
-	if plans := deriveIngressPlan(nil, ""); len(plans) != 0 {
+	if plans := deriveIngressPlan(nil, "", testTag); len(plans) != 0 {
 		t.Fatalf("got %d plans for no hosts, want 0", len(plans))
 	}
 }
@@ -356,8 +377,8 @@ func TestIngressUpdatesOnDrift(t *testing.T) {
 func TestIngressIdempotentUnderServerNormalisation(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
 		Ingress: []cfIngressRule{
-			{Hostname: "git.example.com", Service: "https://caddy:443"},
-			{Service: "https://caddy:443"},
+			{Hostname: "git.example.com", Service: "https://caddy:443", Description: testTag},
+			{Service: "https://caddy:443", Description: testTag},
 		},
 	})
 	m.setNormalize(true)
@@ -659,10 +680,10 @@ func TestIngressPreservesForeignRuleDescription(t *testing.T) {
 	t.Fatal("foreign rule missing from the written configuration")
 }
 
-// TestIngressKeepsDescriptionOnRewrittenRule covers the rule the plugin DOES
-// manage: rewriting its service must not erase a description someone set in
-// the dashboard.
-func TestIngressKeepsDescriptionOnRewrittenRule(t *testing.T) {
+// TestIngressStampsTagOnRewrittenRule: the plugin authors the description, so
+// rewriting a declared host's rule replaces whatever description was there
+// with its ownership tag.
+func TestIngressStampsTagOnRewrittenRule(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
 		Ingress: []cfIngressRule{
 			{Hostname: "git.example.com", Service: "http://stale:80", Description: "set in dashboard"},
@@ -679,33 +700,28 @@ func TestIngressKeepsDescriptionOnRewrittenRule(t *testing.T) {
 		t.Fatalf("got %d writes, want 1 (the stale service must be corrected)", m.putCount())
 	}
 
-	var hostDesc, catchAllDesc string
 	for _, r := range m.lastPut().Ingress {
-		switch r.Hostname {
-		case "git.example.com":
-			hostDesc = r.Description
-			if r.Service != "https://caddy:443" {
-				t.Errorf("service = %q, want it corrected", r.Service)
-			}
-		case "":
-			catchAllDesc = r.Description
+		if r.Description != testTag {
+			t.Errorf("rule %q description = %q, want the ownership tag", r.Hostname, r.Description)
 		}
 	}
-	if hostDesc != "set in dashboard" {
-		t.Errorf("rewritten rule lost its description: %q", hostDesc)
+	var hostService string
+	for _, r := range m.lastPut().Ingress {
+		if r.Hostname == "git.example.com" {
+			hostService = r.Service
+		}
 	}
-	if catchAllDesc != "catch-all note" {
-		t.Errorf("catch-all lost its description: %q", catchAllDesc)
+	if hostService != "https://caddy:443" {
+		t.Errorf("service = %q, want it corrected", hostService)
 	}
 }
 
-// TestIngressDescriptionOnlyChangeDoesNotWrite: a description added in the
-// dashboard is not drift, so the plugin must leave it alone rather than
-// rewriting the configuration to normalise it away.
-func TestIngressDescriptionOnlyChangeDoesNotWrite(t *testing.T) {
+// TestIngressCorrectsMissingTag: a rule that lost its tag (or was created
+// before tagging existed) is drift, because the plugin owns the field.
+func TestIngressCorrectsMissingTag(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
 		Ingress: []cfIngressRule{
-			{Hostname: "git.example.com", Service: "https://caddy:443", Description: "added later"},
+			{Hostname: "git.example.com", Service: "https://caddy:443"},
 			{Service: "https://caddy:443"},
 		},
 	})
@@ -716,49 +732,78 @@ func TestIngressDescriptionOnlyChangeDoesNotWrite(t *testing.T) {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
-	if m.putCount() != 0 {
-		t.Errorf("got %d writes, want 0: a description alone is not drift", m.putCount())
+	if m.putCount() != 1 {
+		t.Fatalf("got %d writes, want 1: a missing tag is drift", m.putCount())
 	}
-	// And it must still be there, untouched.
-	for _, r := range m.storedConfig().Ingress {
-		if r.Hostname == "git.example.com" && r.Description != "added later" {
-			t.Errorf("description = %q, want it left intact", r.Description)
+	for _, r := range m.lastPut().Ingress {
+		if r.Description != testTag {
+			t.Errorf("rule %q description = %q, want the tag", r.Hostname, r.Description)
 		}
 	}
 }
 
+// TestIngressForeignRuleTagLeftAlone: an undeclared rule keeps whatever
+// description it has, because the plugin only rewrites what it declares.
+func TestIngressForeignRuleTagLeftAlone(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "other.example.com", Service: "http://other:8080", Description: "someone else's note"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	for _, r := range m.lastPut().Ingress {
+		if r.Hostname == "other.example.com" {
+			if r.Description != "someone else's note" {
+				t.Errorf("foreign description = %q, want it untouched", r.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("foreign rule missing from the written configuration")
+}
+
 // TestInheritUnmanagedFieldsDirect exercises the helper's precedence rules.
+// Description is not part of it: the plugin authors that field.
 func TestInheritUnmanagedFieldsDirect(t *testing.T) {
 	merged := []cfIngressRule{
-		{Hostname: "a.example.com", Service: "s"},
-		{Hostname: "b.example.com", Service: "s", Description: "derived"},
-		{Service: "s"},
+		{Hostname: "a.example.com", Service: "s", Description: testTag},
+		{Hostname: "b.example.com", Service: "s", Path: json.RawMessage(`"/derived"`)},
+		{Service: "s", Description: testTag},
 	}
 	current := []cfIngressRule{
 		{Hostname: "a.example.com", Service: "old", Description: "from current", OriginRequest: json.RawMessage(`{"x":1}`)},
-		{Hostname: "b.example.com", Service: "old", Description: "from current"},
-		{Service: "old", Description: "catch-all from current"},
+		{Hostname: "b.example.com", Service: "old", Path: json.RawMessage(`"/current"`), OriginRequest: json.RawMessage(`{"y":2}`)},
+		{Service: "old", Description: "catch-all from current", OriginRequest: json.RawMessage(`{"z":3}`)},
 	}
 	inheritUnmanagedFields(merged, current)
 
-	if merged[0].Description != "from current" {
-		t.Errorf("empty description not inherited: %q", merged[0].Description)
-	}
 	if string(merged[0].OriginRequest) != `{"x":1}` {
 		t.Errorf("originRequest not inherited: %s", merged[0].OriginRequest)
 	}
-	if merged[1].Description != "derived" {
-		t.Errorf("existing description must win: %q", merged[1].Description)
+	if merged[0].Description != testTag {
+		t.Errorf("description must come from the plan, not be inherited: %q", merged[0].Description)
 	}
-	if merged[2].Description != "catch-all from current" {
-		t.Errorf("catch-all (empty hostname) not matched: %q", merged[2].Description)
+	if string(merged[1].Path) != `"/derived"` {
+		t.Errorf("existing path must win: %s", merged[1].Path)
+	}
+	if string(merged[1].OriginRequest) != `{"y":2}` {
+		t.Errorf("originRequest not inherited for b: %s", merged[1].OriginRequest)
+	}
+	if string(merged[2].OriginRequest) != `{"z":3}` {
+		t.Errorf("catch-all (empty hostname) not matched: %s", merged[2].OriginRequest)
 	}
 
 	// A rule with no counterpart keeps empty fields rather than inheriting
 	// unrelated metadata.
 	fresh := []cfIngressRule{{Hostname: "new.example.com", Service: "s"}}
 	inheritUnmanagedFields(fresh, current)
-	if fresh[0].Description != "" || len(fresh[0].OriginRequest) != 0 {
+	if len(fresh[0].OriginRequest) != 0 || len(fresh[0].Path) != 0 {
 		t.Errorf("unmatched rule gained metadata: %#v", fresh[0])
 	}
 }

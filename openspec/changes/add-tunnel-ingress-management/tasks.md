@@ -52,9 +52,11 @@
 - [x] 5.11 Credential-absence test: tunnel hosts declared with no `account` → zero tunnel API calls, DNS still reconciled
 - [x] 5.12 Shadowing test: a preserved `*.example.com` foreign rule plus a declared `git.example.com` → warning emitted naming both
 - [x] 5.13 Account-resolution tests: derived account id used, explicit `account_id` wins, and the phase skips (no API call) when no zone resolved
-- [x] 5.14 Add `description` to `cfIngressRule` and carry non-empty descriptions over to rewritten rules (keyed by hostname, catch-all included), so a write never erases dashboard-authored metadata; tests for foreign-rule preservation, rewritten-rule preservation, catch-all preservation, description-alone-is-not-drift, and the precedence rules of the inherit helper
+- [x] 5.14 Add `description` to `cfIngressRule` and carry metadata over to rewritten rules (keyed by hostname, catch-all included), so a write never erases operator-set fields
 - [x] 5.15 Preserve `originRequest` and `path` on rewritten rules too (generalised into `inheritUnmanagedFields`), after the E2E showed a declared host's rule losing `originRequest.matchSNItoHost`, which turned every tunnel request into a 502; regression tests for both fields
 - [x] 5.16 E2E-verified against the live tunnel: with a stale service injected by hand, a reconcile corrected the service and kept `originRequest` on all three rules, while a no-drift reload left `version` untouched
+- [x] 5.17 Write the instance ownership tag into every derived rule's `description` (the ingress counterpart of the record comment) and include `description` in the drift comparison, so a missing or stale tag is corrected; keep description OUT of `inheritUnmanagedFields` since the plugin now authors it; tests for tagging, tag-correction, tag-in-place-is-not-drift, and a foreign rule's description being left alone
+- [x] 5.18 Confirm the tag is written but never acted on: no rule is ever deleted on the basis of its description, so D6 stands and a future ingress prune needs its own change
 
 ## 6. Test environment migration
 

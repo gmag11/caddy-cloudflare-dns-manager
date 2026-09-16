@@ -215,6 +215,11 @@ carrying `tunnel_default_service`. Because that default is an ingress rule and
 not a DNS record, **no `*.<zone>` DNS record is needed** — undeclared subdomains
 simply do not resolve.
 
+Each written rule carries the instance ownership tag in its **Description**
+field, the same `<tag_prefix>:<instance>` marker used on DNS records, so you can
+tell which Caddy instance authored a route. The tag is informational: the plugin
+never deletes ingress rules, since a description is user-editable.
+
 | Subdirective | Description |
 | --- | --- |
 | `tunnel <uuid>` | Marks the host tunnel-backed. Mutually exclusive with `ip`, `ip6` and `proxied`. |

@@ -35,7 +35,12 @@ func normalizeDefaultService(configured string) string {
 // calls that Caddy may run concurrently, so the slice order is not stable
 // between reloads; without sorting, an unchanged config would produce a
 // reordered plan and the drift check would report a change on every reload.
-func deriveIngressPlan(hosts []HostConfig, defaultService string) map[string][]cfIngressRule {
+//
+// Every rule carries the instance ownership tag in its description, the
+// ingress counterpart of the comment the plugin writes on DNS records. The tag
+// is written but not yet acted on: no rule is ever deleted, because a rule's
+// description cannot be trusted as proof of authorship when a user can edit it.
+func deriveIngressPlan(hosts []HostConfig, defaultService, tag string) map[string][]cfIngressRule {
 	def := normalizeDefaultService(defaultService)
 
 	byTunnel := make(map[string][]HostConfig)
@@ -61,14 +66,15 @@ func deriveIngressPlan(hosts []HostConfig, defaultService string) map[string][]c
 				service = def
 			}
 			rules = append(rules, cfIngressRule{
-				Hostname: strings.ToLower(hc.Host),
-				Service:  service,
+				Hostname:    strings.ToLower(hc.Host),
+				Service:     service,
+				Description: tag,
 			})
 		}
 		// The default rule has no hostname, which is what makes it match all
 		// traffic. It is always present: the API requires a terminating
 		// catch-all, and it is also the "default route" the config asks for.
-		rules = append(rules, cfIngressRule{Service: def})
+		rules = append(rules, cfIngressRule{Service: def, Description: tag})
 		plans[tunnelID] = rules
 	}
 	return plans
@@ -127,9 +133,10 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 	return merged, !ingressRulesEqual(current, merged), shadowed
 }
 
-// inheritUnmanagedFields copies the fields the plugin does not author —
-// description, path and originRequest — from the existing rule at the same
-// hostname (the empty hostname matching the catch-all).
+// inheritUnmanagedFields copies the fields the plugin does not author — path
+// and originRequest — from the existing rule at the same hostname (the empty
+// hostname matching the catch-all). Description is deliberately NOT inherited:
+// the plugin authors it, so it comes from the derived plan.
 //
 // Without this, a declared host's rule is regenerated from the derived plan
 // and anything the operator set in the dashboard on that rule is lost. An
@@ -141,17 +148,15 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 // cleared: a rule with no counterpart keeps its empty fields.
 func inheritUnmanagedFields(merged, current []cfIngressRule) {
 	type unmanaged struct {
-		description   string
 		path          json.RawMessage
 		originRequest json.RawMessage
 	}
 	byHost := make(map[string]unmanaged, len(current))
 	for _, r := range current {
-		if r.Description == "" && len(r.Path) == 0 && len(r.OriginRequest) == 0 {
+		if len(r.Path) == 0 && len(r.OriginRequest) == 0 {
 			continue
 		}
 		byHost[strings.ToLower(r.Hostname)] = unmanaged{
-			description:   r.Description,
 			path:          r.Path,
 			originRequest: r.OriginRequest,
 		}
@@ -160,9 +165,6 @@ func inheritUnmanagedFields(merged, current []cfIngressRule) {
 		prev, ok := byHost[strings.ToLower(merged[i].Hostname)]
 		if !ok {
 			continue
-		}
-		if merged[i].Description == "" {
-			merged[i].Description = prev.description
 		}
 		if len(merged[i].Path) == 0 {
 			merged[i].Path = prev.path
@@ -187,13 +189,15 @@ func wildcardMatches(pattern, host string) bool {
 }
 
 // ingressRulesEqual reports whether two rule slices are equivalent on the
-// fields the plugin manages: hostname and service.
+// fields the plugin manages: hostname, service and the ownership description.
 //
 // Comparing only managed fields is deliberate. Cloudflare normalises what it
 // stores (it may add an empty originRequest object and it bumps version), so a
 // deep equality check against the server's rendering would report drift on
 // every run and issue a write on every reload — an idempotence bug that a
-// mock returning a fixed document would never reveal.
+// mock returning a fixed document would never reveal. Path and originRequest
+// are therefore excluded, while description is included because the plugin
+// authors it and must correct a rule that lost or changed its tag.
 func ingressRulesEqual(a, b []cfIngressRule) bool {
 	if len(a) != len(b) {
 		return false
@@ -203,6 +207,9 @@ func ingressRulesEqual(a, b []cfIngressRule) bool {
 			return false
 		}
 		if a[i].Service != b[i].Service {
+			return false
+		}
+		if a[i].Description != b[i].Description {
 			return false
 		}
 	}
@@ -217,8 +224,8 @@ func ingressRulesEqual(a, b []cfIngressRule) bool {
 // Failures are returned rather than fatal, so a Tunnel API problem never
 // prevents DNS reconciliation (and vice versa). A partial failure leaves DNS
 // correct and is retried on the next config load.
-func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []HostConfig, defaultService string, logger *zap.Logger) error {
-	plans := deriveIngressPlan(hosts, defaultService)
+func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []HostConfig, defaultService, tag string, logger *zap.Logger) error {
+	plans := deriveIngressPlan(hosts, defaultService, tag)
 	if len(plans) == 0 {
 		return nil
 	}

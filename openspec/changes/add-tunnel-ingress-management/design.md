@@ -92,17 +92,19 @@ Because a preserved foreign **wildcard** rule can match a hostname the plugin al
 
 *Rationale*: silently preserving a wildcard that shadows a declared host would produce the exact "resolution goes somewhere unexpected" class of bug this change exists to eliminate.
 
-### D5b: Unmanaged rule metadata is carried over, not erased
+### D5b: Rules are tagged in `description`; only unmanaged metadata is inherited
 
-A write replaces the whole configuration, so any field the plugin neither models nor round-trips is lost. `Path` and `OriginRequest` are raw JSON and survive by construction; `description` is an ordinary string field, so it is modelled explicitly and, for rules the plugin rewrites, inherited by hostname from the rule currently there.
+Every rule the plugin authors carries the instance tag in its `description` — the ingress counterpart of the comment written on DNS records. `description` is therefore a **managed** field: a rule whose tag is missing or stale is drift and gets rewritten.
 
-*Rationale*: verified against the live API that `description` is accepted and persisted on a Free-plan zone, so descriptions are something users actually set from the dashboard. Erasing them on every reconcile would be a silent data loss of exactly the kind D3 avoids for `warp-routing`.
+Verified against the live API that `description` is accepted and persisted on a Free-plan zone, so this is usable rather than aspirational.
 
-This is **not** an ownership claim: the plugin never authors or clears a description, and a description alone is not drift. Enforcing ownership via `description` (the ingress equivalent of the DNS comment tag, which would unlock ingress prune and reopen D6) is deliberately left out — the field is only preserved.
+**The tag is written but not acted on.** The plugin never deletes a rule based on its description, so D6 still holds: a description is user-editable, and treating it as proof of authorship would let a mistaken or copied tag authorise a deletion. Writing the tag now means the data exists for a future ingress prune, without taking on the destructive risk today.
 
-**`originRequest` and `path` ride the same rule, and for `originRequest` that is load-bearing.** Because a declared host's rule is regenerated from the derived plan, anything the operator set on that rule is replaced — and `originRequest` is not always cosmetic. `matchSNItoHost` is the case that bit in the E2E: without it, `cloudflared` sends the *service URL's* hostname as SNI, and a Caddy site using a wildcard certificate (`*.example.com`) has no certificate for `caddy`, so the TLS handshake fails with `remote error: tls: internal error` and every request through the tunnel becomes a 502. The plugin cannot express this option (it models only `hostname` and `service`), so preserving what the operator wrote is the only way the two can coexist.
+For the fields the plugin genuinely does not author — `path` and `originRequest` — it inherits the existing value by hostname, because a write replaces the whole configuration. Dropping `originRequest` is not cosmetic: without `matchSNItoHost`, `cloudflared` presents the service URL's hostname as SNI, a wildcard-certificate origin rejects it, and every request through the tunnel becomes a 502. The E2E caught this, not the unit tests.
 
-*Alternative considered*: a first-class `matchSNItoHost`/`originRequest` subdirective. Rejected for now: it expands the Caddyfile surface and implies the plugin owns origin tuning, when the safer default is to preserve whatever is there.
+*Alternative rejected*: leaving `description` unmodelled and relying on the raw-JSON treatment. It only protects fields the decoder does not see; a known field on a rewritten rule is dropped because the derived rule has no value for it.
+
+*Alternative rejected*: implementing ingress prune now that tagging exists. Deletion is destructive and its failure mode (removing a rule that serves live traffic) is worse than leaving an inert orphan, so it deserves its own change with its own safeguards.
 
 ### D6: Undeclared rules are never deleted — and that is a deliberate limitation
 

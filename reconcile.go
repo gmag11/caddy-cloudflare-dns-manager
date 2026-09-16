@@ -149,7 +149,7 @@ func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, a
 	}
 
 	cli := newTunnelClientWithBase(app.apiBase, accountID, app.TunnelAPIToken)
-	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, app.logger)
+	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, app.ownershipTag(), app.logger)
 }
 
 // resolveAccountID returns the account id for tunnel API calls. An explicit

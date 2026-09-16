@@ -53,9 +53,33 @@ The global `cf_dns_manager` block SHALL accept an optional `tunnel_default_servi
 - **WHEN** `tunnel_default_service` is declared with a value that is neither a supported service URL nor an `http_status:<code>` service
 - **THEN** the adapter rejects the config with an error naming the invalid value
 
+### Requirement: Rules carry the instance ownership tag
+
+Every ingress rule the plugin authors SHALL carry the instance ownership tag in its `description`, the ingress counterpart of the comment written on DNS records. The tag SHALL be corrected on drift, so a rule that lost or changed its tag is rewritten. The plugin SHALL NOT delete any rule on the basis of its description, because a description is user-editable and therefore not proof of authorship.
+
+#### Scenario: Derived rules are tagged
+
+- **WHEN** the plugin writes a plan for a tunnel
+- **THEN** every rule it authors, including the catch-all, carries the instance ownership tag as its description
+
+#### Scenario: A missing or changed tag is drift
+
+- **WHEN** a declared host's rule exists with the right service but no tag, or a different description
+- **THEN** the configuration is rewritten so the rule carries the instance tag
+
+#### Scenario: Tag in place is not drift
+
+- **WHEN** a declared host's rule already carries the right service and the instance tag
+- **THEN** no write is issued for that configuration
+
+#### Scenario: Tag is never the basis for deletion
+
+- **WHEN** a rule is not declared by the configuration, whatever its description says
+- **THEN** it is preserved and never deleted
+
 ### Requirement: Unmanaged rule metadata is preserved
 
-Ingress rules carry fields the plugin does not manage, notably a human-readable `description`, a `path` and an `originRequest`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
+Ingress rules carry fields the plugin does not manage, notably a `path` and an `originRequest`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
 
 Preserving `originRequest` is load-bearing rather than cosmetic: an option such as `matchSNItoHost` cannot be expressed by the plugin, and losing it makes `cloudflared` present the service URL's hostname as SNI, which a wildcard-certificate origin rejects, turning every request into a 502.
 
@@ -67,7 +91,7 @@ Preserving `originRequest` is load-bearing rather than cosmetic: an option such 
 #### Scenario: Rewritten rule keeps its origin request
 
 - **WHEN** a declared host's rule has a stale service and an `originRequest` such as `matchSNItoHost`
-- **THEN** the written rule carries the corrected service and the original `originRequest`
+- **THEN** the written rule carries the corrected service, the instance tag, and the original `originRequest`
 
 #### Scenario: Rewritten rule keeps its path
 
@@ -76,18 +100,18 @@ Preserving `originRequest` is load-bearing rather than cosmetic: an option such 
 
 #### Scenario: Catch-all metadata preserved
 
-- **WHEN** the existing catch-all carries a description or an origin request and the plugin re-emits the default rule
-- **THEN** they are carried over to the emitted catch-all
+- **WHEN** the existing catch-all carries an origin request and the plugin re-emits the default rule
+- **THEN** it is carried over to the emitted catch-all
 
 #### Scenario: A preserved field alone is not drift
 
-- **WHEN** the only difference between the stored configuration and the derived plan is an unmanaged field
+- **WHEN** the only difference between the stored configuration and the derived plan is a `path` or an `originRequest`
 - **THEN** no write is issued and the field is left intact
 
 #### Scenario: Metadata is never invented
 
 - **WHEN** a declared host has no existing rule to inherit from
-- **THEN** its derived rule is written with no description, path or origin request
+- **THEN** its derived rule is written with the instance tag and no path or origin request
 
 ### Requirement: Ingress plan derivation
 

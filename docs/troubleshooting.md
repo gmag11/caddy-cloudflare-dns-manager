@@ -155,10 +155,12 @@ and keep maintaining `config.yml` yourself.
 
 ### A removed host still appears in the tunnel's Routes
 
-Expected. Ingress rules carry no ownership tag, so the plugin cannot tell a rule
-it wrote from a hand-made one, and it never deletes rules. The leftover is inert:
-if the zone has `prune`, the CNAME was deleted too, so the hostname no longer
-resolves. Delete the rule by hand in the dashboard if you want it gone.
+Expected. The plugin writes its instance tag into each rule's Description field,
+but never deletes a rule on that basis: a description is user-editable, so it is
+not proof of authorship. The leftover is inert — if the zone has `prune`, the
+CNAME was deleted too, so the hostname no longer resolves. Delete the rule by
+hand in the dashboard if you want it gone; it is the one whose Description shows
+your instance tag.
 
 ### An undeclared subdomain resolves
 
