@@ -292,15 +292,18 @@ func TestIngressHTTPSRuleWithoutSNIIsDrift(t *testing.T) {
 	}
 }
 
-// TestIngressNonHTTPSServiceNeedsNoSNI: only HTTPS origins involve a TLS
-// handshake, so other services are left alone.
+// TestIngressNonHTTPSServiceNeedsNoSNI: only the https:// service type consults
+// the option, so every other service is left alone. The TLS socket is included
+// deliberately: it performs a TLS handshake yet still must not gain the key,
+// because cloudflared's unix service type has no field for it.
 func TestIngressNonHTTPSServiceNeedsNoSNI(t *testing.T) {
 	plain := []cfIngressRule{{Hostname: "git.example.com", Service: "http://caddy:80"}}
 	status := []cfIngressRule{{Hostname: "git.example.com", Service: "http_status:404"}}
-	if !ingressRulesEqual(plain, plain) || !ingressRulesEqual(status, status) {
+	socket := []cfIngressRule{{Hostname: "git.example.com", Service: "unix+tls:///run/caddy.sock"}}
+	if !ingressRulesEqual(plain, plain) || !ingressRulesEqual(status, status) || !ingressRulesEqual(socket, socket) {
 		t.Error("a non-HTTPS service must not require matchSNItoHost")
 	}
-	for _, r := range []cfIngressRule{plain[0], status[0]} {
+	for _, r := range []cfIngressRule{plain[0], status[0], socket[0]} {
 		if got := ensureMatchSNIToHost(nil, r.Service); len(got) != 0 {
 			t.Errorf("service %q gained an origin request: %s", r.Service, got)
 		}
@@ -1079,8 +1082,9 @@ func TestIngressAddsMatchSNIToHostForHTTPSService(t *testing.T) {
 	}
 }
 
-// TestIngressLeavesNonHTTPSServiceAlone: the option only makes sense for a TLS
-// origin, so an http:// service must not gain it.
+// TestIngressLeavesNonHTTPSServiceAlone: the option is consulted only by the
+// https:// service type, so any other service is left without it. The reason is
+// the service type, not whether TLS is involved — see the TLS socket case below.
 func TestIngressLeavesNonHTTPSServiceAlone(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
 	app := newIngressTestApp(t, m, "http://caddy:80")
@@ -1094,6 +1098,38 @@ func TestIngressLeavesNonHTTPSServiceAlone(t *testing.T) {
 		if hasMatchSNIToHost(r.OriginRequest) {
 			t.Errorf("non-HTTPS rule %q gained matchSNItoHost: %s", r.Hostname, r.OriginRequest)
 		}
+	}
+}
+
+// TestIngressLeavesTLSSocketAlone: a unix+tls service also performs a TLS
+// handshake, so it is the case that proves the rule is about the service type
+// rather than about TLS. cloudflared models a unix origin as its own service
+// type, and that type carries no matchSNItoHost field; only its HTTP service
+// consults the option. Writing it here would look correct and do nothing, so
+// this pins that the plugin does not.
+func TestIngressLeavesTLSSocketAlone(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+	app := newIngressTestApp(t, m, "unix+tls:///run/caddy.sock")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	for _, r := range m.lastPut().Ingress {
+		if hasMatchSNIToHost(r.OriginRequest) {
+			t.Errorf("TLS socket rule %q (service %s) gained matchSNItoHost: %s",
+				r.Hostname, r.Service, r.OriginRequest)
+		}
+	}
+
+	// And the whole configuration is stable on a second pass: adding an option
+	// merely because a socket speaks TLS would make every reload rewrite.
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if m.putCount() != 1 {
+		t.Errorf("got %d writes over two reconciles, want 1 (no drift)", m.putCount())
 	}
 }
 
@@ -1358,6 +1394,84 @@ example.com {
 	respond "ok"
 }
 `, "tunnel_default_service")
+}
+
+// TestAdaptRejectsBadTunnelService covers the per-host path through adapt. Both
+// subdirectives share parseTunnelService, but only the global default was
+// exercised with an invalid value, leaving the host block's route into the same
+// validator unverified.
+func TestAdaptRejectsBadTunnelService(t *testing.T) {
+	requireAdaptErr(t, `
+{
+	cf_dns_manager {
+		zone example.com api_token x
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+		tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
+		tunnel_service ftp://nope:21
+	}
+	respond "ok"
+}
+`, "tunnel_service")
+}
+
+// TestAdaptRejectsSocketServiceWithNoPath: a bare socket prefix names no
+// socket, and the guard has to count leading slashes as no path — "unix://"
+// leaves "//" behind after the prefix is trimmed, which is not an empty string.
+func TestAdaptRejectsSocketServiceWithNoPath(t *testing.T) {
+	for _, svc := range []string{"unix:", "unix://", "unix+tls:", "unix+tls://"} {
+		requireAdaptErr(t, `
+{
+	cf_dns_manager {
+		zone example.com api_token x
+		tunnel_default_service `+svc+`
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+	}
+	respond "ok"
+}
+`, "tunnel_default_service")
+	}
+}
+
+// TestAdaptAcceptsDocumentedSocketSpellings pins the contract from the spec:
+// cloudflared takes everything after the prefix as the socket path, so the
+// spelling in Cloudflare's own examples and the URL-looking one are both valid
+// and both reach the app config unchanged.
+func TestAdaptAcceptsDocumentedSocketSpellings(t *testing.T) {
+	for _, svc := range []string{"unix:/run/app.sock", "unix:///run/app.sock", "unix+tls:/run/app.sock"} {
+		cfg := adaptCaddyfile(t, `
+{
+	cf_dns_manager {
+		zone example.com api_token x
+		tunnel_default_service `+svc+`
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+	}
+	respond "ok"
+}
+`)
+		appCfg, ok := cfg["apps"].(map[string]any)[appName].(map[string]any)
+		if !ok {
+			t.Fatalf("app config missing or unexpected shape for %q: %#v", svc, cfg["apps"])
+		}
+		if appCfg["tunnel_default_service"] != svc {
+			t.Errorf("tunnel_default_service = %v, want %q passed through unchanged",
+				appCfg["tunnel_default_service"], svc)
+		}
+	}
 }
 
 func TestParseTunnelServiceValidation(t *testing.T) {

@@ -395,8 +395,11 @@ You do not add it by hand, and a rule that loses it is repaired on the next
 reconcile. The plugin merges its key into the existing origin request rather than
 replacing it, so options you set yourself are preserved.
 
-It is only added for `https://` services: a plain `http://` origin performs no
-TLS handshake, so the option would be meaningless.
+It is only added for `https://` services, and the reason is the service type
+rather than whether TLS is involved: `matchSNItoHost` is read only by
+`cloudflared`'s HTTP service. A `unix+tls:` socket also speaks TLS but is a
+different service type, so it is left alone — writing the option there would
+have no effect.
 
 Alternatives, and why they are worse here:
 

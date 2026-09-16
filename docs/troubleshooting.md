@@ -202,8 +202,10 @@ fails and every request becomes a 502/522.
 **The plugin sets `originRequest.matchSNItoHost: true` on every rule whose
 service is `https://`, so this should not happen.** If you still see it:
 
-- Check the rule's service scheme. The option is only added for `https://`; a
-  plain `http://` origin performs no TLS handshake and never needed it.
+- Check the rule's service scheme. The option is only added for `https://`,
+  because that is the only service type `cloudflared` reads it from. A `unix+tls:`
+  socket does speak TLS but is left alone; so is a plain `http://` origin, which
+  performs no handshake at all.
 - Check whether something external rewrote the route. The plugin repairs a
   missing option on the next reconcile, so a single reload should clear it.
 - If a rule carries `originServerName`, that pins the SNI deliberately. The

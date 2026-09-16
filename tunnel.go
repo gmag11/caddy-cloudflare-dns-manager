@@ -77,8 +77,14 @@ type cfIngressRule struct {
 const matchSNIToHostOption = "matchSNItoHost"
 
 // wantsMatchSNIToHost reports whether a service should carry matchSNItoHost.
-// Only HTTPS origins involve a TLS handshake to the origin, so for any other
-// service the option is meaningless and the plugin leaves it alone.
+//
+// The test is the service type, not whether TLS is involved. Only cloudflared's
+// HTTP service reads this option; its unix service is a separate type with no
+// field for it, and every other scheme is a stream service that never performs
+// a TLS handshake to the origin at all. A unix+tls service therefore goes
+// without the option even though it does speak TLS — writing it there would
+// look correct and have no effect, because the API stores unknown option keys
+// without validating them.
 func wantsMatchSNIToHost(service string) bool {
 	return strings.HasPrefix(service, "https://")
 }
