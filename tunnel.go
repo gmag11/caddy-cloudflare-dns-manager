@@ -48,13 +48,18 @@ type cfTunnelConfig struct {
 }
 
 // cfIngressRule is one ingress rule. Only Hostname and Service are managed by
-// the plugin; Path and OriginRequest are carried through untouched so rules
-// authored outside the plugin survive a write. Both are raw JSON for the same
-// round-trip reason as above, and Path is raw so its absence stays absent
-// rather than becoming an empty string.
+// the plugin; Description, Path and OriginRequest are carried through untouched
+// so rules authored outside the plugin survive a write.
+//
+// Description is modelled explicitly rather than left to the JSON decoder: a
+// field the struct does not know about is dropped silently on the next write,
+// which would erase a description set in the dashboard. Path and OriginRequest
+// are raw JSON for the same round-trip reason, and Path is raw so its absence
+// stays absent rather than becoming an empty string.
 type cfIngressRule struct {
 	Hostname      string          `json:"hostname,omitempty"`
 	Service       string          `json:"service"`
+	Description   string          `json:"description,omitempty"`
 	Path          json.RawMessage `json:"path,omitempty"`
 	OriginRequest json.RawMessage `json:"originRequest,omitempty"`
 }

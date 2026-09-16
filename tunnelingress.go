@@ -117,7 +117,34 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 	merged = append(merged, preserved...)
 	merged = append(merged, plan...)
 
+	// Replacing a rule's service must not erase metadata the plugin does not
+	// manage. Descriptions are only carried over, never authored, so this is
+	// not an ownership claim: it is the same "don't destroy what you don't
+	// model" rule the raw-JSON fields follow.
+	inheritDescriptions(merged, current)
+
 	return merged, !ingressRulesEqual(current, merged), shadowed
+}
+
+// inheritDescriptions fills empty rule descriptions from the matching current
+// rule, keyed by hostname (the empty hostname matching the catch-all). A
+// description already present on a derived rule wins, and descriptions are
+// never cleared.
+func inheritDescriptions(merged, current []cfIngressRule) {
+	byHost := make(map[string]string, len(current))
+	for _, r := range current {
+		if r.Description != "" {
+			byHost[strings.ToLower(r.Hostname)] = r.Description
+		}
+	}
+	for i := range merged {
+		if merged[i].Description != "" {
+			continue
+		}
+		if d, ok := byHost[strings.ToLower(merged[i].Hostname)]; ok {
+			merged[i].Description = d
+		}
+	}
 }
 
 // wildcardMatches reports whether a wildcard hostname pattern (only "*." is

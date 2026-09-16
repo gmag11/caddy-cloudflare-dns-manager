@@ -52,6 +52,7 @@
 - [x] 5.11 Credential-absence test: tunnel hosts declared with no `account` → zero tunnel API calls, DNS still reconciled
 - [x] 5.12 Shadowing test: a preserved `*.example.com` foreign rule plus a declared `git.example.com` → warning emitted naming both
 - [x] 5.13 Account-resolution tests: derived account id used, explicit `account_id` wins, and the phase skips (no API call) when no zone resolved
+- [x] 5.14 Add `description` to `cfIngressRule` and carry non-empty descriptions over to rewritten rules (keyed by hostname, catch-all included), so a write never erases dashboard-authored metadata; tests for foreign-rule preservation, rewritten-rule preservation, catch-all preservation, description-alone-is-not-drift, and the precedence rules of the inherit helper
 
 ## 6. Test environment migration
 

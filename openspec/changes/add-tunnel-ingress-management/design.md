@@ -92,6 +92,16 @@ Because a preserved foreign **wildcard** rule can match a hostname the plugin al
 
 *Rationale*: silently preserving a wildcard that shadows a declared host would produce the exact "resolution goes somewhere unexpected" class of bug this change exists to eliminate.
 
+### D5b: Unmanaged rule metadata is carried over, not erased
+
+A write replaces the whole configuration, so any field the plugin neither models nor round-trips is lost. `Path` and `OriginRequest` are raw JSON and survive by construction; `description` is an ordinary string field, so it is modelled explicitly and, for rules the plugin rewrites, inherited by hostname from the rule currently there.
+
+*Rationale*: verified against the live API that `description` is accepted and persisted on a Free-plan zone, so descriptions are something users actually set from the dashboard. Erasing them on every reconcile would be a silent data loss of exactly the kind D3 avoids for `warp-routing`.
+
+This is **not** an ownership claim: the plugin never authors or clears a description, and a description alone is not drift. Enforcing ownership via `description` (the ingress equivalent of the DNS comment tag, which would unlock ingress prune and reopen D6) is deliberately left out — the field is only preserved.
+
+*Alternative rejected*: leaving `description` unmodelled and relying on the raw-JSON treatment. It only protects fields the decoder does not see; a known field on a rewritten rule is dropped because the derived rule simply has no value for it.
+
 ### D6: Undeclared rules are never deleted — and that is a deliberate limitation
 
 Ingress rules have **no comment/ownership field**, unlike DNS records which carry `<tag_prefix>:<instance>`. Ownership by convention is therefore impossible: a rule with a given hostname is indistinguishable from a hand-made one. The plugin SHALL NOT delete rules it cannot prove it wrote.

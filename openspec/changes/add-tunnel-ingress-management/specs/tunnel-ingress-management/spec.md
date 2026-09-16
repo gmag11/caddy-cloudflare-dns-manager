@@ -53,6 +53,35 @@ The global `cf_dns_manager` block SHALL accept an optional `tunnel_default_servi
 - **WHEN** `tunnel_default_service` is declared with a value that is neither a supported service URL nor an `http_status:<code>` service
 - **THEN** the adapter rejects the config with an error naming the invalid value
 
+### Requirement: Unmanaged rule metadata is preserved
+
+Ingress rules carry fields the plugin does not manage, notably a human-readable `description`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty description SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear descriptions, and a description appearing on its own SHALL NOT be treated as drift.
+
+#### Scenario: Foreign rule keeps its description
+
+- **WHEN** an undeclared rule carries a description and the plugin writes the configuration
+- **THEN** the description is present and unchanged in the written configuration
+
+#### Scenario: Rewritten rule keeps its description
+
+- **WHEN** a declared host's rule has a stale service and a description set outside the plugin
+- **THEN** the written rule carries the corrected service and the original description
+
+#### Scenario: Catch-all description preserved
+
+- **WHEN** the existing catch-all carries a description and the plugin re-emits the default rule
+- **THEN** the description is carried over to the emitted catch-all
+
+#### Scenario: Description alone is not drift
+
+- **WHEN** the only difference between the stored configuration and the derived plan is a rule description
+- **THEN** no write is issued and the description is left intact
+
+#### Scenario: Descriptions are never invented
+
+- **WHEN** a declared host has no existing rule to inherit from
+- **THEN** its derived rule is written with no description
+
 ### Requirement: Ingress plan derivation
 
 For each tunnel UUID declared by at least one host, the plugin SHALL derive exactly one ingress plan from the declared configuration. The plan SHALL contain one rule per hostname declared with that tunnel UUID, ordered deterministically, followed by the configured default rule.

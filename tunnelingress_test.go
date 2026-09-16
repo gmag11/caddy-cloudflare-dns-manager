@@ -635,6 +635,131 @@ func TestIngressWarnsOnShadowingWildcard(t *testing.T) {
 	}
 }
 
+func TestIngressPreservesForeignRuleDescription(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "other.example.com", Service: "http://other:8080", Description: "managed by hand"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	for _, r := range m.lastPut().Ingress {
+		if r.Hostname == "other.example.com" {
+			if r.Description != "managed by hand" {
+				t.Errorf("foreign rule description = %q, want it preserved", r.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("foreign rule missing from the written configuration")
+}
+
+// TestIngressKeepsDescriptionOnRewrittenRule covers the rule the plugin DOES
+// manage: rewriting its service must not erase a description someone set in
+// the dashboard.
+func TestIngressKeepsDescriptionOnRewrittenRule(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "git.example.com", Service: "http://stale:80", Description: "set in dashboard"},
+			{Service: "http_status:404", Description: "catch-all note"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+	if m.putCount() != 1 {
+		t.Fatalf("got %d writes, want 1 (the stale service must be corrected)", m.putCount())
+	}
+
+	var hostDesc, catchAllDesc string
+	for _, r := range m.lastPut().Ingress {
+		switch r.Hostname {
+		case "git.example.com":
+			hostDesc = r.Description
+			if r.Service != "https://caddy:443" {
+				t.Errorf("service = %q, want it corrected", r.Service)
+			}
+		case "":
+			catchAllDesc = r.Description
+		}
+	}
+	if hostDesc != "set in dashboard" {
+		t.Errorf("rewritten rule lost its description: %q", hostDesc)
+	}
+	if catchAllDesc != "catch-all note" {
+		t.Errorf("catch-all lost its description: %q", catchAllDesc)
+	}
+}
+
+// TestIngressDescriptionOnlyChangeDoesNotWrite: a description added in the
+// dashboard is not drift, so the plugin must leave it alone rather than
+// rewriting the configuration to normalise it away.
+func TestIngressDescriptionOnlyChangeDoesNotWrite(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "git.example.com", Service: "https://caddy:443", Description: "added later"},
+			{Service: "https://caddy:443"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	if m.putCount() != 0 {
+		t.Errorf("got %d writes, want 0: a description alone is not drift", m.putCount())
+	}
+	// And it must still be there, untouched.
+	for _, r := range m.storedConfig().Ingress {
+		if r.Hostname == "git.example.com" && r.Description != "added later" {
+			t.Errorf("description = %q, want it left intact", r.Description)
+		}
+	}
+}
+
+// TestInheritDescriptionsDirect exercises the helper's precedence rules.
+func TestInheritDescriptionsDirect(t *testing.T) {
+	merged := []cfIngressRule{
+		{Hostname: "a.example.com", Service: "s"},
+		{Hostname: "b.example.com", Service: "s", Description: "derived"},
+		{Service: "s"},
+	}
+	current := []cfIngressRule{
+		{Hostname: "a.example.com", Service: "old", Description: "from current"},
+		{Hostname: "b.example.com", Service: "old", Description: "from current"},
+		{Service: "old", Description: "catch-all from current"},
+	}
+	inheritDescriptions(merged, current)
+
+	if merged[0].Description != "from current" {
+		t.Errorf("empty description not inherited: %q", merged[0].Description)
+	}
+	if merged[1].Description != "derived" {
+		t.Errorf("existing description must win: %q", merged[1].Description)
+	}
+	if merged[2].Description != "catch-all from current" {
+		t.Errorf("catch-all (empty hostname) not matched: %q", merged[2].Description)
+	}
+
+	// A rule with no counterpart keeps an empty description rather than
+	// inheriting an unrelated one.
+	fresh := []cfIngressRule{{Hostname: "new.example.com", Service: "s"}}
+	inheritDescriptions(fresh, current)
+	if fresh[0].Description != "" {
+		t.Errorf("unmatched rule gained a description: %q", fresh[0].Description)
+	}
+}
+
 func TestIngressGetFailureIsSurfaced(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
 	m.setFailGet(true)
