@@ -55,32 +55,39 @@ The global `cf_dns_manager` block SHALL accept an optional `tunnel_default_servi
 
 ### Requirement: Unmanaged rule metadata is preserved
 
-Ingress rules carry fields the plugin does not manage, notably a human-readable `description`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty description SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear descriptions, and a description appearing on its own SHALL NOT be treated as drift.
+Ingress rules carry fields the plugin does not manage, notably a human-readable `description`, a `path` and an `originRequest`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
 
-#### Scenario: Foreign rule keeps its description
+Preserving `originRequest` is load-bearing rather than cosmetic: an option such as `matchSNItoHost` cannot be expressed by the plugin, and losing it makes `cloudflared` present the service URL's hostname as SNI, which a wildcard-certificate origin rejects, turning every request into a 502.
 
-- **WHEN** an undeclared rule carries a description and the plugin writes the configuration
-- **THEN** the description is present and unchanged in the written configuration
+#### Scenario: Foreign rule keeps its metadata
 
-#### Scenario: Rewritten rule keeps its description
+- **WHEN** an undeclared rule carries a description and an origin request, and the plugin writes the configuration
+- **THEN** both are present and unchanged in the written configuration
 
-- **WHEN** a declared host's rule has a stale service and a description set outside the plugin
-- **THEN** the written rule carries the corrected service and the original description
+#### Scenario: Rewritten rule keeps its origin request
 
-#### Scenario: Catch-all description preserved
+- **WHEN** a declared host's rule has a stale service and an `originRequest` such as `matchSNItoHost`
+- **THEN** the written rule carries the corrected service and the original `originRequest`
 
-- **WHEN** the existing catch-all carries a description and the plugin re-emits the default rule
-- **THEN** the description is carried over to the emitted catch-all
+#### Scenario: Rewritten rule keeps its path
 
-#### Scenario: Description alone is not drift
+- **WHEN** a declared host's rule has a `path` and the plugin corrects its service
+- **THEN** the written rule still carries that `path`
 
-- **WHEN** the only difference between the stored configuration and the derived plan is a rule description
-- **THEN** no write is issued and the description is left intact
+#### Scenario: Catch-all metadata preserved
 
-#### Scenario: Descriptions are never invented
+- **WHEN** the existing catch-all carries a description or an origin request and the plugin re-emits the default rule
+- **THEN** they are carried over to the emitted catch-all
+
+#### Scenario: A preserved field alone is not drift
+
+- **WHEN** the only difference between the stored configuration and the derived plan is an unmanaged field
+- **THEN** no write is issued and the field is left intact
+
+#### Scenario: Metadata is never invented
 
 - **WHEN** a declared host has no existing rule to inherit from
-- **THEN** its derived rule is written with no description
+- **THEN** its derived rule is written with no description, path or origin request
 
 ### Requirement: Ingress plan derivation
 

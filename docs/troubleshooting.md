@@ -173,6 +173,26 @@ resolve.
 > should stay — it is how Caddy serves every subdomain with one certificate. The
 > problem is the DNS record, not the site block.
 
+### 522 or `remote error: tls: internal error` through the tunnel
+
+The ingress rule points at an HTTPS origin, but `cloudflared` presents the wrong
+SNI. By default it uses the *service URL's* hostname — so `service:
+https://caddy:443` sends SNI `caddy`, and a Caddy site using a wildcard
+certificate (`*.example.com`) has no certificate for that name. The handshake
+fails and every request becomes a 502/522.
+
+Fix: add `originRequest.matchSNItoHost: true` to the tunnel's rules, so SNI
+follows the request's `Host`. Set it in the dashboard or via the API; the plugin
+preserves it on every write, so it survives reconciliation.
+
+```
+# cloudflared log
+error="Unable to reach the origin service ... remote error: tls: internal error" ingressRule=0 originService=https://caddy:443
+```
+
+This is the same underlying cause as the redirect-loop entry below, from the
+other side: one is the wrong port, this one is the wrong SNI.
+
 ### 308 redirect loop through the edge
 
 `cloudflared` points at the plain-HTTP port of an origin that redirects

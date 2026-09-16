@@ -220,10 +220,15 @@ the tunnel's ingress plan alongside the DNS records:
 ```
 
 The default becomes the tunnel's catch-all, so every declared subdomain reaches
-Caddy and **no wildcard DNS record is needed**. `matchSNItoHost` is not
-available through the plugin (it manages `hostname` and `service` only); if your
-origin needs a specific SNI behaviour, keep that rule hand-made and the plugin
-will preserve it as a foreign rule.
+Caddy and **no wildcard DNS record is needed**.
+
+> **If your origin is Caddy with a wildcard certificate, add
+> `matchSNItoHost: true` to the tunnel's rules.** The plugin does not manage
+> origin settings, but it *preserves* them: set it once in the dashboard (or via
+> the API) and the plugin carries it over on every write. Without it,
+> `cloudflared` sends the service URL's hostname (`caddy`) as SNI, Caddy has no
+> certificate for that name, and every request becomes a 502
+> (`remote error: tls: internal error`).
 
 > The account token can reconfigure **every** tunnel in the account. Omit the
 > `account` line to keep the plugin DNS-only — then maintain the ingress rules

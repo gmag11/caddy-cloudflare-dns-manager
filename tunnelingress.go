@@ -2,6 +2,7 @@ package cfdnsmanager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -118,31 +119,56 @@ func mergeIngressPlan(current, plan []cfIngressRule) (merged []cfIngressRule, ch
 	merged = append(merged, plan...)
 
 	// Replacing a rule's service must not erase metadata the plugin does not
-	// manage. Descriptions are only carried over, never authored, so this is
-	// not an ownership claim: it is the same "don't destroy what you don't
-	// model" rule the raw-JSON fields follow.
-	inheritDescriptions(merged, current)
+	// manage. Descriptions, paths and origin requests are only carried over,
+	// never authored, so this is not an ownership claim: it is the same
+	// "don't destroy what you don't model" rule the raw-JSON fields follow.
+	inheritUnmanagedFields(merged, current)
 
 	return merged, !ingressRulesEqual(current, merged), shadowed
 }
 
-// inheritDescriptions fills empty rule descriptions from the matching current
-// rule, keyed by hostname (the empty hostname matching the catch-all). A
-// description already present on a derived rule wins, and descriptions are
-// never cleared.
-func inheritDescriptions(merged, current []cfIngressRule) {
-	byHost := make(map[string]string, len(current))
+// inheritUnmanagedFields copies the fields the plugin does not author —
+// description, path and originRequest — from the existing rule at the same
+// hostname (the empty hostname matching the catch-all).
+//
+// Without this, a declared host's rule is regenerated from the derived plan
+// and anything the operator set in the dashboard on that rule is lost. An
+// originRequest such as matchSNItoHost is the sharpest example: dropping it
+// makes cloudflared send the service URL's hostname as SNI, which Caddy
+// refuses for a wildcard-certificate site, turning every request into a 502.
+//
+// A value already present on the derived rule wins, and nothing is ever
+// cleared: a rule with no counterpart keeps its empty fields.
+func inheritUnmanagedFields(merged, current []cfIngressRule) {
+	type unmanaged struct {
+		description   string
+		path          json.RawMessage
+		originRequest json.RawMessage
+	}
+	byHost := make(map[string]unmanaged, len(current))
 	for _, r := range current {
-		if r.Description != "" {
-			byHost[strings.ToLower(r.Hostname)] = r.Description
+		if r.Description == "" && len(r.Path) == 0 && len(r.OriginRequest) == 0 {
+			continue
+		}
+		byHost[strings.ToLower(r.Hostname)] = unmanaged{
+			description:   r.Description,
+			path:          r.Path,
+			originRequest: r.OriginRequest,
 		}
 	}
 	for i := range merged {
-		if merged[i].Description != "" {
+		prev, ok := byHost[strings.ToLower(merged[i].Hostname)]
+		if !ok {
 			continue
 		}
-		if d, ok := byHost[strings.ToLower(merged[i].Hostname)]; ok {
-			merged[i].Description = d
+		if merged[i].Description == "" {
+			merged[i].Description = prev.description
+		}
+		if len(merged[i].Path) == 0 {
+			merged[i].Path = prev.path
+		}
+		if len(merged[i].OriginRequest) == 0 {
+			merged[i].OriginRequest = prev.originRequest
 		}
 	}
 }

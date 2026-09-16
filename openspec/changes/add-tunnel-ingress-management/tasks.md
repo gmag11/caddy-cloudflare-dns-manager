@@ -53,6 +53,8 @@
 - [x] 5.12 Shadowing test: a preserved `*.example.com` foreign rule plus a declared `git.example.com` → warning emitted naming both
 - [x] 5.13 Account-resolution tests: derived account id used, explicit `account_id` wins, and the phase skips (no API call) when no zone resolved
 - [x] 5.14 Add `description` to `cfIngressRule` and carry non-empty descriptions over to rewritten rules (keyed by hostname, catch-all included), so a write never erases dashboard-authored metadata; tests for foreign-rule preservation, rewritten-rule preservation, catch-all preservation, description-alone-is-not-drift, and the precedence rules of the inherit helper
+- [x] 5.15 Preserve `originRequest` and `path` on rewritten rules too (generalised into `inheritUnmanagedFields`), after the E2E showed a declared host's rule losing `originRequest.matchSNItoHost`, which turned every tunnel request into a 502; regression tests for both fields
+- [x] 5.16 E2E-verified against the live tunnel: with a stale service injected by hand, a reconcile corrected the service and kept `originRequest` on all three rules, while a no-drift reload left `version` untouched
 
 ## 6. Test environment migration
 
@@ -61,8 +63,8 @@
 - [x] 6.3 Add `CF_TUNNEL_TOKEN` and `CF_ACCOUNT_TUNNEL_TOKEN` to `testenv/.env.example` (no account id: it is derived); document that `CF_TUNNEL_ID` is still needed for the `tunnel <uuid>` directive
 - [x] 6.4 Add `tunnel_default_service https://caddy:443` and the `account` block to `testenv/Caddyfile`'s global options
 - [x] 6.5 Update `testenv/README.md`: the one-time step becomes "create a remotely-managed tunnel in the dashboard, copy its token", replacing the `tunnel login`/`tunnel create`/credentials instructions
-- [ ] 6.6 Manual E2E: `docker compose up -d`, confirm the plugin writes the ingress plan, and `curl https://<tunnel-host>` returns the site response
-- [ ] 6.7 Manual negative E2E: an undeclared subdomain of the zone returns NXDOMAIN (proving no wildcard DNS record exists)
+- [x] 6.6 Manual E2E: `docker compose up -d`, confirm the plugin writes the ingress plan, and `curl https://<tunnel-host>` returns the site response
+- [x] 6.7 Manual negative E2E: an undeclared subdomain of the zone returns NXDOMAIN (proving no wildcard DNS record exists)
 
 ## 7. Documentation
 

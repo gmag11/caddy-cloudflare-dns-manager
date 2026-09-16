@@ -727,22 +727,25 @@ func TestIngressDescriptionOnlyChangeDoesNotWrite(t *testing.T) {
 	}
 }
 
-// TestInheritDescriptionsDirect exercises the helper's precedence rules.
-func TestInheritDescriptionsDirect(t *testing.T) {
+// TestInheritUnmanagedFieldsDirect exercises the helper's precedence rules.
+func TestInheritUnmanagedFieldsDirect(t *testing.T) {
 	merged := []cfIngressRule{
 		{Hostname: "a.example.com", Service: "s"},
 		{Hostname: "b.example.com", Service: "s", Description: "derived"},
 		{Service: "s"},
 	}
 	current := []cfIngressRule{
-		{Hostname: "a.example.com", Service: "old", Description: "from current"},
+		{Hostname: "a.example.com", Service: "old", Description: "from current", OriginRequest: json.RawMessage(`{"x":1}`)},
 		{Hostname: "b.example.com", Service: "old", Description: "from current"},
 		{Service: "old", Description: "catch-all from current"},
 	}
-	inheritDescriptions(merged, current)
+	inheritUnmanagedFields(merged, current)
 
 	if merged[0].Description != "from current" {
 		t.Errorf("empty description not inherited: %q", merged[0].Description)
+	}
+	if string(merged[0].OriginRequest) != `{"x":1}` {
+		t.Errorf("originRequest not inherited: %s", merged[0].OriginRequest)
 	}
 	if merged[1].Description != "derived" {
 		t.Errorf("existing description must win: %q", merged[1].Description)
@@ -751,12 +754,59 @@ func TestInheritDescriptionsDirect(t *testing.T) {
 		t.Errorf("catch-all (empty hostname) not matched: %q", merged[2].Description)
 	}
 
-	// A rule with no counterpart keeps an empty description rather than
-	// inheriting an unrelated one.
+	// A rule with no counterpart keeps empty fields rather than inheriting
+	// unrelated metadata.
 	fresh := []cfIngressRule{{Hostname: "new.example.com", Service: "s"}}
-	inheritDescriptions(fresh, current)
-	if fresh[0].Description != "" {
-		t.Errorf("unmatched rule gained a description: %q", fresh[0].Description)
+	inheritUnmanagedFields(fresh, current)
+	if fresh[0].Description != "" || len(fresh[0].OriginRequest) != 0 {
+		t.Errorf("unmatched rule gained metadata: %#v", fresh[0])
+	}
+}
+
+// TestMergePreservesOriginRequestOnRewrittenRule covers the metadata the
+// plugin does not author but must not destroy: an originRequest such as
+// matchSNItoHost, which a declared host's rule may carry because the operator
+// set it in the dashboard. Rewriting the rule must keep it.
+func TestMergePreservesOriginRequestOnRewrittenRule(t *testing.T) {
+	sni := json.RawMessage(`{"matchSNItoHost":true}`)
+	current := []cfIngressRule{
+		{Hostname: "git.example.com", Service: "https://caddy:443", OriginRequest: sni},
+		{Service: "https://caddy:443", OriginRequest: sni},
+	}
+	plan := []cfIngressRule{
+		{Hostname: "git.example.com", Service: "https://caddy:443"},
+		{Service: "https://caddy:443"},
+	}
+	merged, _, _ := mergeIngressPlan(current, plan)
+
+	if len(merged) != 2 {
+		t.Fatalf("got %d rules, want 2: %#v", len(merged), merged)
+	}
+	if string(merged[0].OriginRequest) != string(sni) {
+		t.Errorf("rewritten host rule lost its originRequest: %s", merged[0].OriginRequest)
+	}
+	if string(merged[1].OriginRequest) != string(sni) {
+		t.Errorf("re-emitted catch-all lost its originRequest: %s", merged[1].OriginRequest)
+	}
+}
+
+// TestMergePreservesPathOnRewrittenRule is the same guarantee for path, which
+// would otherwise silently degrade a path-scoped rule into a catch-all for the
+// hostname.
+func TestMergePreservesPathOnRewrittenRule(t *testing.T) {
+	path := json.RawMessage(`"/api/.*"`)
+	current := []cfIngressRule{
+		{Hostname: "git.example.com", Service: "http://api:8081", Path: path},
+		{Service: "http_status:404"},
+	}
+	plan := []cfIngressRule{
+		{Hostname: "git.example.com", Service: "https://caddy:443"},
+		{Service: "http_status:404"},
+	}
+	merged, _, _ := mergeIngressPlan(current, plan)
+
+	if string(merged[0].Path) != string(path) {
+		t.Errorf("rewritten host rule lost its path: %s", merged[0].Path)
 	}
 }
 

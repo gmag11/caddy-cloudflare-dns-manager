@@ -100,7 +100,9 @@ A write replaces the whole configuration, so any field the plugin neither models
 
 This is **not** an ownership claim: the plugin never authors or clears a description, and a description alone is not drift. Enforcing ownership via `description` (the ingress equivalent of the DNS comment tag, which would unlock ingress prune and reopen D6) is deliberately left out — the field is only preserved.
 
-*Alternative rejected*: leaving `description` unmodelled and relying on the raw-JSON treatment. It only protects fields the decoder does not see; a known field on a rewritten rule is dropped because the derived rule simply has no value for it.
+**`originRequest` and `path` ride the same rule, and for `originRequest` that is load-bearing.** Because a declared host's rule is regenerated from the derived plan, anything the operator set on that rule is replaced — and `originRequest` is not always cosmetic. `matchSNItoHost` is the case that bit in the E2E: without it, `cloudflared` sends the *service URL's* hostname as SNI, and a Caddy site using a wildcard certificate (`*.example.com`) has no certificate for `caddy`, so the TLS handshake fails with `remote error: tls: internal error` and every request through the tunnel becomes a 502. The plugin cannot express this option (it models only `hostname` and `service`), so preserving what the operator wrote is the only way the two can coexist.
+
+*Alternative considered*: a first-class `matchSNItoHost`/`originRequest` subdirective. Rejected for now: it expands the Caddyfile surface and implies the plugin owns origin tuning, when the safer default is to preserve whatever is there.
 
 ### D6: Undeclared rules are never deleted — and that is a deliberate limitation
 
