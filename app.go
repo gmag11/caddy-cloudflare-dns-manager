@@ -62,8 +62,10 @@ type App struct {
 	// Instance identifies this Caddy server for ownership tagging.
 	Instance string `json:"instance,omitempty"`
 
-	// AccountID is the Cloudflare account id owning the tunnels whose ingress
-	// this plugin manages. Empty disables ingress management entirely.
+	// AccountID optionally pins the Cloudflare account used for Tunnel API
+	// calls. Normally left empty: the account is derived from the zone lookup,
+	// which is exact because a tunnel and its zone always share an account.
+	// Set it only to override that derivation.
 	AccountID string `json:"account_id,omitempty"`
 
 	// TunnelAPIToken is the account-scoped API token (Cloudflare Tunnel Write)
@@ -172,21 +174,7 @@ func (app *App) Validate() error {
 	if app.Instance == "" {
 		return fmt.Errorf("instance cannot be empty")
 	}
-	// The account credential is all-or-nothing: ingress management needs both
-	// halves, and a half-configured credential would silently disable it.
-	if (app.AccountID == "") != (app.TunnelAPIToken == "") {
-		return fmt.Errorf("account and its api_token must be declared together: account is %q and api_token is %s",
-			app.AccountID, setOrUnset(app.TunnelAPIToken))
-	}
 	return nil
-}
-
-// setOrUnset reports whether a value is present, without disclosing it.
-func setOrUnset(val string) string {
-	if val == "" {
-		return "unset"
-	}
-	return "set"
 }
 
 // Start runs reconciliation for every declared host. It also runs when no

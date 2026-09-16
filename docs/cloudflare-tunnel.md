@@ -129,7 +129,9 @@ account-scoped `account` line and a default service to the global block:
 
 		# Account-scoped token (Account -> Cloudflare Tunnel -> Edit). Optional:
 		# without it the plugin manages DNS only and never calls the Tunnel API.
-		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		# The account id is derived from the zone: a tunnel always lives in its
+		# zone's account.
+		account {$CF_TUNNEL_TOKEN}
 
 		# Destination for tunnel traffic no declared host claims. It becomes the
 		# tunnel's catch-all rule, so no wildcard DNS record is needed.
@@ -202,9 +204,11 @@ halves automatically.
 
 ### Rules for the `account` and `tunnel_default_service` options
 
-- `account <account-id> api_token <token>` supplies the account-scoped
-  credential for the Tunnel API. Declared once in the global block; the account
-  id and token must be given together.
+- `account <token>` supplies the account-scoped credential for the Tunnel API.
+  Declared once in the global block. The account id is **not** configured: the
+  plugin takes it from the zone lookup, which is exact because Cloudflare only
+  proxies a tunnel for records in the same account. `account_id <account-id>`
+  overrides that derivation if you ever need to.
 - Without it, the plugin reconciles DNS only and logs that ingress management
   needs the credential. Nothing else changes.
 - `tunnel_default_service <service>` accepts the same service values as

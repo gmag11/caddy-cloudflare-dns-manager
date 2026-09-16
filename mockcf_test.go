@@ -16,20 +16,24 @@ type mockCloudflare struct {
 	mu       sync.Mutex
 	zoneID   string
 	zoneName string
-	records  []cfDNSRecord
-	nextID   int
-	calls    []string
+	// accountID is reported as the zone's owning account, which the plugin
+	// derives the Tunnel API path from.
+	accountID string
+	records   []cfDNSRecord
+	nextID    int
+	calls     []string
 	// zonePrune mirrors the zone-level prune opt-in.
 	zonePrune bool
 }
 
 func newMockCloudflare(t *testing.T, zoneName string, seed []cfDNSRecord) *mockCloudflare {
 	m := &mockCloudflare{
-		t:        t,
-		zoneID:   "zone-" + zoneName,
-		zoneName: zoneName,
-		records:  append([]cfDNSRecord{}, seed...),
-		nextID:   1000,
+		t:         t,
+		zoneID:    "zone-" + zoneName,
+		zoneName:  zoneName,
+		accountID: "acct-" + zoneName,
+		records:   append([]cfDNSRecord{}, seed...),
+		nextID:    1000,
 	}
 	return m
 }
@@ -46,9 +50,11 @@ func (m *mockCloudflare) handleZones(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, "GET /zones")
 	w.Header().Set("Content-Type", "application/json")
+	zone := cfZone{ID: m.zoneID, Name: m.zoneName}
+	zone.Account.ID = m.accountID
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
-		"result":  []cfZone{{ID: m.zoneID, Name: m.zoneName}},
+		"result":  []cfZone{zone},
 	})
 }
 

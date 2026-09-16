@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -65,6 +66,12 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		errs  []error
 	)
 
+	// accountByZone captures the owning account id of each reconciled zone, as
+	// reported by the zone lookup. The ingress phase needs it for the Tunnel
+	// API path, and this avoids a second lookup.
+	var acctMu sync.Mutex
+	accountByZone := make(map[string]string)
+
 	for zkey, zoneHosts := range byZone {
 		cli, ok := zoneClients[zkey]
 		if !ok {
@@ -75,11 +82,17 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		go func(zone string, cli *cloudflareClient, zoneHosts []HostConfig) {
 			defer wg.Done()
 			det := familyDetection{ipv4: publicIP, ipv6: publicIP6, ipv4Failed: ipDetectionFailed, ipv6Failed: ip6DetectionFailed}
-			if err := app.reconcileZone(ctx, cli, zone, zoneHosts, det); err != nil {
+			accountID, err := app.reconcileZone(ctx, cli, zone, zoneHosts, det)
+			if err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
 			}
+			acctMu.Lock()
+			if accountID != "" {
+				accountByZone[zone] = accountID
+			}
+			acctMu.Unlock()
 		}(zkey, cli, zoneHosts)
 	}
 	wg.Wait()
@@ -89,7 +102,7 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	// without fragmenting one tunnel's plan across concurrent writes. Failures
 	// here are aggregated alongside zone failures, never fatal, so a Tunnel
 	// API problem cannot leave DNS unreconciled.
-	if err := app.reconcileIngressPhase(ctx, hosts); err != nil {
+	if err := app.reconcileIngressPhase(ctx, hosts, accountByZone); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -100,10 +113,16 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 }
 
 // reconcileIngressPhase runs the tunnel ingress reconciliation when a tunnel
-// credential and at least one tunnel host are configured. Without the account
-// credential the plugin must not call the Tunnel API at all, so the phase is
-// skipped with an explanatory log line rather than failing.
-func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig) error {
+// token and at least one tunnel host are configured. Without the token the
+// plugin must not call the Tunnel API at all, so the phase is skipped with an
+// explanatory log line rather than failing.
+//
+// accountByZone carries the owning account id discovered during the DNS phase.
+// Cloudflare requires a tunnel and its zone to share an account — a
+// cfargotunnel.com CNAME only proxies records in the same account — so the
+// zone's account is the tunnel's account, and the user does not have to
+// configure it.
+func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, accountByZone map[string]string) error {
 	tunnelHosts := 0
 	for _, hc := range hosts {
 		if hc.TunnelID != "" {
@@ -114,15 +133,43 @@ func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig) e
 		return nil
 	}
 
-	if app.AccountID == "" || app.TunnelAPIToken == "" {
-		app.logger.Info("tunnel hosts declared but no account credential configured; skipping tunnel ingress management",
+	if app.TunnelAPIToken == "" {
+		app.logger.Info("tunnel hosts declared but no tunnel API token configured; skipping tunnel ingress management",
 			zap.Int("tunnel_hosts", tunnelHosts),
-			zap.String("hint", "add `account <account-id> api_token <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
+			zap.String("hint", "add `account <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
 		return nil
 	}
 
-	cli := newTunnelClientWithBase(app.apiBase, app.AccountID, app.TunnelAPIToken)
+	accountID := app.resolveAccountID(accountByZone)
+	if accountID == "" {
+		app.logger.Warn("could not determine the Cloudflare account id; skipping tunnel ingress management",
+			zap.Int("tunnel_hosts", tunnelHosts),
+			zap.String("cause", "no managed zone resolved successfully in this run"))
+		return nil
+	}
+
+	cli := newTunnelClientWithBase(app.apiBase, accountID, app.TunnelAPIToken)
 	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, app.logger)
+}
+
+// resolveAccountID returns the account id for tunnel API calls. An explicit
+// AccountID always wins; otherwise the account of any zone that resolved in
+// this run is used, since a tunnel necessarily lives in its zone's account.
+// When several zones resolved, the lexicographically smallest key is taken so
+// the choice is deterministic.
+func (app *App) resolveAccountID(accountByZone map[string]string) string {
+	if app.AccountID != "" {
+		return app.AccountID
+	}
+	zones := make([]string, 0, len(accountByZone))
+	for z := range accountByZone {
+		zones = append(zones, z)
+	}
+	if len(zones) == 0 {
+		return ""
+	}
+	sort.Strings(zones)
+	return accountByZone[zones[0]]
 }
 
 // familyDetection carries the shared public-IP detection results for one
@@ -191,22 +238,24 @@ func (app *App) detectPublicIPs(ctx context.Context, hosts []HostConfig) (ipv4, 
 	return ipv4, ipv6, ipv4Failed, ipv6Failed
 }
 
-// reconcileZone reconciles all hosts in one zone, then prunes if enabled.
+// reconcileZone reconciles all hosts in one zone, then prunes if enabled. It
+// returns the zone's owning account id (empty when the lookup failed) so the
+// ingress phase can address the Tunnel API without a second lookup.
 func (app *App) reconcileZone(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone string,
 	hosts []HostConfig,
 	det familyDetection,
-) error {
-	zoneID, err := cli.zoneIDByName(ctx, zone)
+) (string, error) {
+	zoneID, accountID, err := cli.zoneByName(ctx, zone)
 	if err != nil {
-		return fmt.Errorf("zone %q: %v", zone, err)
+		return "", fmt.Errorf("zone %q: %v", zone, err)
 	}
 
 	records, err := cli.listRecords(ctx, zoneID)
 	if err != nil {
-		return fmt.Errorf("zone %q: listing records: %v", zone, err)
+		return "", fmt.Errorf("zone %q: listing records: %v", zone, err)
 	}
 
 	// Canonical map from zone-relative record name ("@", "foo", "a.b") and
@@ -293,10 +342,10 @@ func (app *App) reconcileZone(
 
 	if app.zonePruneEnabled(zone) {
 		if err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag); err != nil {
-			return fmt.Errorf("zone %q: prune: %v", zone, err)
+			return accountID, fmt.Errorf("zone %q: prune: %v", zone, err)
 		}
 	}
-	return nil
+	return accountID, nil
 }
 
 // markManaged records that the declared config asks the plugin to manage a

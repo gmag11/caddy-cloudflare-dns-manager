@@ -14,10 +14,11 @@
 		# touched.
 		zone {$CF_ZONE} api_token {$CF_API_TOKEN} prune
 
-		# Account-scoped credential for the Tunnel API, needed to write the
-		# tunnel's ingress plan. Its blast radius covers every tunnel in the
-		# account, so it is a separate, opt-in credential.
-		account {$CF_ACCOUNT_ID} api_token {$CF_ACCOUNT_TUNNEL_TOKEN}
+		# Account-scoped token for the Tunnel API, needed to write the tunnel's
+		# ingress plan. Its blast radius covers every tunnel in the account, so
+		# it is a separate, opt-in credential. The account id is derived from
+		# the zone below (a tunnel always lives in its zone's account).
+		account {$CF_ACCOUNT_TUNNEL_TOKEN}
 
 		# Default destination for tunnel traffic that no declared host claims.
 		# It becomes the tunnel's final catch-all rule, which is why no

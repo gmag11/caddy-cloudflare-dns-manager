@@ -279,10 +279,11 @@ func TestIngressRulesEqualIgnoresUnmanagedFields(t *testing.T) {
 // --- Group 5: reconciliation against the mock Tunnel API ---------------------
 
 // newIngressTestApp builds an App wired to the tunnel mock for ingress tests.
+// The account id is derived from the zone lookup in production, so tests pass
+// it explicitly through accountByZone.
 func newIngressTestApp(t *testing.T, m *mockTunnelAPI, defaultService string) *App {
 	t.Helper()
 	return &App{
-		AccountID:            "acct-1",
 		TunnelAPIToken:       "token-1",
 		TunnelDefaultService: defaultService,
 		TagPrefix:            "caddy-cf-dns",
@@ -290,6 +291,19 @@ func newIngressTestApp(t *testing.T, m *mockTunnelAPI, defaultService string) *A
 		logger:               zap.NewNop(),
 		apiBase:              m.server(t),
 	}
+}
+
+// testAccounts is the account-by-zone map a successful DNS phase produces.
+func testAccounts() map[string]string {
+	return map[string]string{"example.com": testAccountID}
+}
+
+const testAccountID = "7886ae726a21ed3ed8f586b7e88dd409"
+
+// runIngress drives the ingress phase the way Reconcile does, with the account
+// id already discovered from the zone lookup.
+func runIngress(app *App, hosts []HostConfig) error {
+	return app.reconcileIngressPhase(context.Background(), hosts, testAccounts())
 }
 
 func TestIngressCreatesRulesWhenNoneExist(t *testing.T) {
@@ -300,7 +314,7 @@ func TestIngressCreatesRulesWhenNoneExist(t *testing.T) {
 		{Host: "git.example.com", TunnelID: testTunnelA},
 		{Host: "ha.example.com", TunnelID: testTunnelA},
 	}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -326,7 +340,7 @@ func TestIngressUpdatesOnDrift(t *testing.T) {
 	app := newIngressTestApp(t, m, "https://caddy:443")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -350,7 +364,7 @@ func TestIngressIdempotentUnderServerNormalisation(t *testing.T) {
 	app := newIngressTestApp(t, m, "https://caddy:443")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -368,7 +382,7 @@ func TestIngressPreservesForeignRules(t *testing.T) {
 	app := newIngressTestApp(t, m, "https://caddy:443")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -391,7 +405,7 @@ func TestIngressPreservesWarpRoutingAndOriginRequest(t *testing.T) {
 
 	app := newIngressTestApp(t, m, "https://caddy:443")
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -415,7 +429,7 @@ func TestIngressNeverDeletesRules(t *testing.T) {
 
 	// The config declares no host for the rule above: it was removed.
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -437,7 +451,7 @@ func TestIngressRefusesLocallyManagedTunnel(t *testing.T) {
 	app := newIngressTestApp(t, m, "https://caddy:443")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	err := app.reconcileIngressPhase(context.Background(), hosts)
+	err := runIngress(app, hosts)
 
 	if err == nil {
 		t.Fatal("expected an error for a locally-managed tunnel")
@@ -479,12 +493,13 @@ func TestIngressFailureDoesNotBlockDNS(t *testing.T) {
 	}
 }
 
-func TestIngressSkippedWithoutAccountCredential(t *testing.T) {
+func TestIngressSkippedWithoutTunnelToken(t *testing.T) {
 	m := newMockCloudflare(t, "example.com", nil)
 	ta := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
 
 	app, _ := testApp(t, m, "203.0.113.10", true)
-	// No AccountID / TunnelAPIToken: the Tunnel API must not be called at all.
+	// No TunnelAPIToken: the Tunnel API must not be called at all, even though
+	// the DNS phase still resolves the account id.
 	app.apiBase = combinedServer(t, m, ta)
 
 	hosts := []HostConfig{
@@ -495,10 +510,96 @@ func TestIngressSkippedWithoutAccountCredential(t *testing.T) {
 	}
 
 	if ta.callCount(http.MethodGet) != 0 || ta.putCount() != 0 {
-		t.Error("no Tunnel API call may be made without the account credential")
+		t.Error("no Tunnel API call may be made without the tunnel token")
 	}
 	if rec := m.recordByNameType("git", "CNAME"); rec == nil {
-		t.Error("DNS must still be reconciled without the account credential")
+		t.Error("DNS must still be reconciled without the tunnel token")
+	}
+}
+
+// TestIngressDerivesAccountFromZone covers the point of the token-only
+// `account` option: the account id comes from the zone lookup the plugin
+// already performs, so the user never configures it. Cloudflare guarantees a
+// tunnel and its zone share an account.
+func TestIngressDerivesAccountFromZone(t *testing.T) {
+	m := newMockCloudflare(t, "example.com", nil)
+	ta := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+
+	app, _ := testApp(t, m, "203.0.113.10", true)
+	app.TunnelAPIToken = "tunnel-token"
+	app.TunnelDefaultService = "https://caddy:443"
+	app.apiBase = combinedServer(t, m, ta)
+
+	hosts := []HostConfig{
+		{Host: "git.example.com", TunnelID: testTunnelA, ZoneConfig: ZoneConfig{Zone: "example.com", APIToken: "token"}},
+	}
+	if err := app.Reconcile(hosts); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// The zone mock's account must appear in the Tunnel API path, proving the
+	// id was derived rather than configured.
+	want := "/accounts/" + m.accountID + "/cfd_tunnel/" + testTunnelA + "/configurations"
+	if !ta.hasCall(http.MethodGet, want) {
+		t.Errorf("expected a GET to %s; recorded calls: %v", want, ta.calls)
+	}
+	if ta.putCount() != 1 {
+		t.Errorf("got %d writes, want 1", ta.putCount())
+	}
+}
+
+// TestIngressExplicitAccountIDOverridesDerivation covers the escape hatch.
+func TestIngressExplicitAccountIDOverridesDerivation(t *testing.T) {
+	ta := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+	app := newIngressTestApp(t, ta, "https://caddy:443")
+	app.AccountID = "explicit-account"
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	if !ta.hasCall(http.MethodGet, "/accounts/explicit-account/cfd_tunnel/"+testTunnelA+"/configurations") {
+		t.Errorf("explicit account id was not used; recorded calls: %v", ta.calls)
+	}
+}
+
+// TestIngressSkipsWhenNoZoneResolved covers a failed DNS phase: without a
+// resolved account the phase must skip rather than guess.
+func TestIngressSkipsWhenNoZoneResolved(t *testing.T) {
+	ta := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+	app := newIngressTestApp(t, ta, "")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := app.reconcileIngressPhase(context.Background(), hosts, map[string]string{}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if ta.callCount(http.MethodGet) != 0 || ta.putCount() != 0 {
+		t.Error("no Tunnel API call may be made when the account id is unknown")
+	}
+}
+
+// TestResolveAccountIDPrefersExplicit is a focused unit test of the precedence
+// rule, including the deterministic tie-break across zones.
+func TestResolveAccountIDPrefersExplicit(t *testing.T) {
+	app := &App{}
+
+	if got := app.resolveAccountID(map[string]string{}); got != "" {
+		t.Errorf("empty derivation = %q, want empty", got)
+	}
+	if got := app.resolveAccountID(map[string]string{"z.com": "acct-z"}); got != "acct-z" {
+		t.Errorf("single zone = %q, want acct-z", got)
+	}
+
+	// Several zones: the smallest zone name wins, so the result is stable.
+	multi := map[string]string{"b.com": "acct-b", "a.com": "acct-a"}
+	if got := app.resolveAccountID(multi); got != "acct-a" {
+		t.Errorf("multi-zone derivation = %q, want the deterministic acct-a", got)
+	}
+
+	app.AccountID = "acct-explicit"
+	if got := app.resolveAccountID(multi); got != "acct-explicit" {
+		t.Errorf("explicit account = %q, want it to win over derivation", got)
 	}
 }
 
@@ -511,7 +612,7 @@ func TestIngressWarnsOnShadowingWildcard(t *testing.T) {
 	app := newIngressTestApp(t, m, "https://caddy:443")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -540,7 +641,7 @@ func TestIngressGetFailureIsSurfaced(t *testing.T) {
 	app := newIngressTestApp(t, m, "")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	err := app.reconcileIngressPhase(context.Background(), hosts)
+	err := runIngress(app, hosts)
 	if err == nil {
 		t.Fatal("expected a read failure to be surfaced")
 	}
@@ -563,7 +664,7 @@ func TestIngressPutFailureIsSurfaced(t *testing.T) {
 	app := newIngressTestApp(t, m, "")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	err := app.reconcileIngressPhase(context.Background(), hosts)
+	err := runIngress(app, hosts)
 	if err == nil {
 		t.Fatal("expected a write failure to be surfaced")
 	}
@@ -578,7 +679,7 @@ func TestIngressEmptyConfigurationIsNotAnError(t *testing.T) {
 	app := newIngressTestApp(t, m, "")
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 
@@ -601,7 +702,8 @@ func TestAdaptAccountAndTunnelDefaultService(t *testing.T) {
 {
 	cf_dns_manager {
 		zone example.com api_token {$CF_EXAMPLE}
-		account 023e105f4ecef8ad9ca31a8372d0c353 api_token {$CF_TUNNEL}
+		account {$CF_TUNNEL}
+		account_id 023e105f4ecef8ad9ca31a8372d0c353
 		tunnel_default_service https://caddy:443
 	}
 }
@@ -616,25 +718,31 @@ example.com {
 	cfg := adaptCaddyfile(t, input)
 	assertAppPresent(t, cfg)
 
-	// The account values must survive adaptation into the app config.
 	appCfg, ok := cfg["apps"].(map[string]any)[appName].(map[string]any)
 	if !ok {
 		t.Fatalf("app config missing or unexpected shape: %#v", cfg["apps"])
 	}
+	if appCfg["tunnel_api_token"] != "account-token" {
+		t.Errorf("tunnel_api_token = %v, want the declared token", appCfg["tunnel_api_token"])
+	}
 	if appCfg["account_id"] != "023e105f4ecef8ad9ca31a8372d0c353" {
-		t.Errorf("account_id = %v, want the declared account", appCfg["account_id"])
+		t.Errorf("account_id = %v, want the declared override", appCfg["account_id"])
 	}
 	if appCfg["tunnel_default_service"] != "https://caddy:443" {
 		t.Errorf("tunnel_default_service = %v, want the declared service", appCfg["tunnel_default_service"])
 	}
 }
 
-func TestAdaptRejectsAccountWithoutToken(t *testing.T) {
-	requireAdaptErr(t, `
+// TestAdaptAccountTokenOnly covers the normal form: the account id is derived
+// from the zone lookup, so `account` carries only the token.
+func TestAdaptAccountTokenOnly(t *testing.T) {
+	t.Setenv("CF_TUNNEL", "account-token")
+
+	cfg := adaptCaddyfile(t, `
 {
 	cf_dns_manager {
 		zone example.com api_token x
-		account 023e105f4ecef8ad9ca31a8372d0c353
+		account {$CF_TUNNEL}
 	}
 }
 
@@ -644,7 +752,35 @@ example.com {
 	}
 	respond "ok"
 }
-`, "expected 'api_token")
+`)
+	appCfg, ok := cfg["apps"].(map[string]any)[appName].(map[string]any)
+	if !ok {
+		t.Fatalf("app config missing or unexpected shape: %#v", cfg["apps"])
+	}
+	if appCfg["tunnel_api_token"] != "account-token" {
+		t.Errorf("tunnel_api_token = %v, want the declared token", appCfg["tunnel_api_token"])
+	}
+	if _, present := appCfg["account_id"]; present {
+		t.Errorf("account_id must stay unset when only the token is declared: %#v", appCfg)
+	}
+}
+
+func TestAdaptRejectsAccountWithoutToken(t *testing.T) {
+	requireAdaptErr(t, `
+{
+	cf_dns_manager {
+		zone example.com api_token x
+		account
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+	}
+	respond "ok"
+}
+`, "account requires an API token")
 }
 
 func TestAdaptRejectsTunnelServiceWithoutTunnel(t *testing.T) {
@@ -732,7 +868,7 @@ func TestIngressDefaultNeverRoutesToACaddyGuess(t *testing.T) {
 	app := newIngressTestApp(t, m, "") // unset default
 
 	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := app.reconcileIngressPhase(context.Background(), hosts); err != nil {
+	if err := runIngress(app, hosts); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
 

@@ -213,7 +213,7 @@ the tunnel's ingress plan alongside the DNS records:
 {
 	cf_dns_manager {
 		zone example.com api_token {$CF_EXAMPLE}
-		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		account {$CF_TUNNEL_TOKEN}
 		tunnel_default_service https://caddy:443
 	}
 }

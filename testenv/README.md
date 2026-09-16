@@ -23,7 +23,8 @@ about the tunnel is versioned here.
 Caddyfile                    Cloudflare
 ─────────                    ──────────
 zone ... api_token ...   →   DNS records (A/AAAA/CNAME), tagged with instance
-account ... api_token ...→   tunnel ingress plan (rules + catch-all)
+                             └─ the lookup also yields the account id
+account ...              →   tunnel ingress plan (rules + catch-all)
 tunnel_default_service   →     └─ the catch-all, NOT a wildcard DNS record
 tunnel <uuid> (per host) →     └─ one rule per declared hostname
 ```
@@ -38,15 +39,15 @@ resolve at all.
 
    ```bash
    cp testenv/.env.example testenv/.env
-   # edit: CF_API_TOKEN, CF_ACCOUNT_TUNNEL_TOKEN, CF_ACCOUNT_ID, CF_TUNNEL_*,
-   #       CF_ZONE, CF_INSTANCE
+   # edit: CF_API_TOKEN, CF_ACCOUNT_TUNNEL_TOKEN, CF_TUNNEL_*, CF_ZONE, CF_INSTANCE
    ```
 
    `CF_API_TOKEN` is **zone-scoped** (`Zone → DNS → Edit`) and drives the DNS
    records. `CF_ACCOUNT_TUNNEL_TOKEN` is **account-scoped**
    (`Account → Cloudflare Tunnel → Edit`) and drives the ingress plan; it can
    reconfigure every tunnel in the account, which is why it is a separate,
-   optional credential.
+   optional credential. The account id is not configured: the plugin derives it
+   from the zone lookup.
 
 2. Create the tunnel (one-time, in the dashboard — no local credentials file
    is involved):

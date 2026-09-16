@@ -1,20 +1,22 @@
 ## 1. Model and Caddyfile surface
 
-- [x] 1.1 Add `AccountID`, `TunnelAPIToken`, `TunnelDefaultService` to `App` in `app.go` with JSON tags `account_id,omitempty`, `tunnel_api_token,omitempty`, `tunnel_default_service,omitempty`; add `account_id`/`tunnel_api_token` to the app's `Validate` (both or neither)
+- [x] 1.1 Add `TunnelAPIToken`, `TunnelDefaultService` and an optional `AccountID` override to `App` in `app.go` with JSON tags `tunnel_api_token,omitempty`, `tunnel_default_service,omitempty`, `account_id,omitempty`
 - [x] 1.2 Add `TunnelService string` to `HostConfig` in `app.go` with JSON tag `tunnel_service,omitempty`
-- [x] 1.3 Add the `account <id> api_token <token>` case to `parseGlobalOption` in `caddyfile.go`: two required args, error on missing/extra args, error if declared twice
+- [x] 1.3 Add the `account <token>` case to `parseGlobalOption` in `caddyfile.go`: one required arg, error on missing/extra args, error if declared twice; plus an optional `account_id <account-id>` override case
 - [x] 1.4 Add the `tunnel_default_service <service>` case to `parseGlobalOption`: single required arg, no extra args, validated by the service parser from 1.6
 - [x] 1.5 Add the `tunnel_service <service>` case to `parseHostBlock`: single required arg; at end of block, error if `TunnelService != ""` and `TunnelID == ""`, naming the missing `tunnel` subdirective
 - [x] 1.6 Add `parseTunnelService(val string) error` validating the value is `http://`, `https://`, `unix://`, `unix+tls://`, `tcp://`, `ssh://`, `rdp://`, `smb://` with a non-empty address, or `http_status:<3-digit code>`; used by 1.4 and 1.5
 - [x] 1.7 Extend the global-options doc comment in `caddyfile.go` and the per-site directive doc comment with the new subdirectives
 
-## 2. Tunnel configuration API client
+## 2. Tunnel configuration API client and account derivation
 
 - [x] 2.1 Add `tunnelClient` (new file `tunnel.go`) holding an account id, a token and an optional base URL test seam, mirroring the `apiBase` seam pattern in `App`
 - [x] 2.2 Implement `getConfiguration(ctx, tunnelID) (cfTunnelConfig, error)` calling `GET /accounts/{id}/cfd_tunnel/{tunnelID}/configurations`, decoding `config`, `source` and `version`; treat an empty/absent `ingress` as "no rules"
 - [x] 2.3 Implement `putConfiguration(ctx, tunnelID, cfg cfTunnelConfig) error` calling `PUT` with the full `config` object round-tripped (never reconstruct it), so `originRequest` and `warp-routing` survive
 - [x] 2.4 Reuse the existing request helper and error-envelope decoding; assert in a test that an API error body surfaces its Cloudflare error code and message
 - [x] 2.5 Add the `cfTunnelConfig` / `cfIngressRule` types: `ingress[]` with `hostname`, `service`, `path`, `originRequest` (as `json.RawMessage` so unmodelled fields round-trip), plus `origin_request` and `warp-routing` at the top level
+- [x] 2.6 Capture `account.id` in `cfZone` and split `zoneIDByName` into `zoneByName` returning `(zoneID, accountID, error)`, so the lookup reconciliation already performs also yields the account for the Tunnel API path
+- [x] 2.7 Test that a `Reconcile` run derives the account id from the zone (asserting the account appears in the Tunnel API path) and that an explicit `account_id` overrides it
 
 ## 3. Ingress plan derivation and merge
 
@@ -31,8 +33,9 @@
 - [x] 4.2 Enforce the remotely-managed rule: when `source` reports local, log an error naming the remedy and skip the write, per D9
 - [x] 4.3 Log a warning for each shadowing preserved wildcard rule reported by 3.3, naming the rule and the affected host
 - [x] 4.4 Log at Info when a plan is written (tunnel id, rule count, whether the catch-all came from a configured default or the fail-closed fallback) and at Debug when a plan is already in sync
-- [x] 4.5 Wire the phase into `Reconcile` in `reconcile.go`: after the per-zone `WaitGroup`, skip entirely when no account credential or no tunnel hosts are configured; append failures to the existing error aggregation so ingress failures never abort DNS reconciliation
-- [x] 4.6 Log once, at Info, when tunnel hosts exist but no account credential is configured, explaining that ingress management requires the `account` block
+- [x] 4.5 Wire the phase into `Reconcile` in `reconcile.go`: after the per-zone `WaitGroup`, skip entirely when no tunnel token or no tunnel hosts are configured; append failures to the existing error aggregation so ingress failures never abort DNS reconciliation
+- [x] 4.6 Log once, at Info, when tunnel hosts exist but no tunnel token is configured, explaining that ingress management requires the `account` block
+- [x] 4.7 Have `reconcileZone` return the zone's owning account id and collect it per zone, so `reconcileIngressPhase` receives it; implement `resolveAccountID` (explicit `account_id` wins, otherwise the lexicographically smallest resolved zone) and skip with a warning when no account could be derived
 
 ## 5. Mock-API tests
 
@@ -48,12 +51,13 @@
 - [x] 5.10 Failure-isolation test: the Tunnel API returns 500 → DNS records are still reconciled and the ingress error is surfaced in the reconcile result
 - [x] 5.11 Credential-absence test: tunnel hosts declared with no `account` → zero tunnel API calls, DNS still reconciled
 - [x] 5.12 Shadowing test: a preserved `*.example.com` foreign rule plus a declared `git.example.com` → warning emitted naming both
+- [x] 5.13 Account-resolution tests: derived account id used, explicit `account_id` wins, and the phase skips (no API call) when no zone resolved
 
 ## 6. Test environment migration
 
 - [x] 6.1 Convert `testenv/docker-compose.yml`'s `cloudflared` service to the remotely-managed form (`tunnel --no-autoupdate run --token $CF_TUNNEL_TOKEN`), dropping `--config` and `--cred-file`
 - [x] 6.2 Delete `testenv/tunnel/config.yml` and update `testenv/Caddyfile` comments that reference it
-- [x] 6.3 Add `CF_TUNNEL_TOKEN` and `CF_ACCOUNT_ID` to `testenv/.env.example`; document that `CF_TUNNEL_ID` is still needed for the `tunnel <uuid>` directive
+- [x] 6.3 Add `CF_TUNNEL_TOKEN` and `CF_ACCOUNT_TUNNEL_TOKEN` to `testenv/.env.example` (no account id: it is derived); document that `CF_TUNNEL_ID` is still needed for the `tunnel <uuid>` directive
 - [x] 6.4 Add `tunnel_default_service https://caddy:443` and the `account` block to `testenv/Caddyfile`'s global options
 - [x] 6.5 Update `testenv/README.md`: the one-time step becomes "create a remotely-managed tunnel in the dashboard, copy its token", replacing the `tunnel login`/`tunnel create`/credentials instructions
 - [ ] 6.6 Manual E2E: `docker compose up -d`, confirm the plugin writes the ingress plan, and `curl https://<tunnel-host>` returns the site response

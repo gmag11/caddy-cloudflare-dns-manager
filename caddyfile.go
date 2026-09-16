@@ -18,7 +18,8 @@ import (
 //
 //	cf_dns_manager {
 //	    zone <zone> api_token <token> [prune]
-//	    account <account-id> api_token <token>
+//	    account <token>            # token-only; the account id is derived
+//	    account_id <account-id>    # optional override of that derivation
 //	    tunnel_default_service <service>
 //	    ip_url <url>
 //	    ip6_url <url>
@@ -42,24 +43,24 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 			}
 			app.Zones = append(app.Zones, zc)
 		case "account":
-			if app.AccountID != "" || app.TunnelAPIToken != "" {
+			if app.TunnelAPIToken != "" {
 				return nil, d.Errf("account specified more than once")
 			}
 			if !d.NextArg() {
-				return nil, d.Errf("account requires an account id")
+				return nil, d.Errf("account requires an API token (account-scoped, Cloudflare Tunnel Write)")
 			}
-			accountID := d.Val()
-			if accountID == "" {
-				return nil, d.Errf("account id cannot be empty")
+			app.TunnelAPIToken = d.Val()
+			if d.NextArg() {
+				return nil, d.ArgErr()
 			}
-			if !d.NextArg() || d.Val() != "api_token" {
-				return nil, d.Errf("account %q: expected 'api_token <token>'", accountID)
+		case "account_id":
+			if app.AccountID != "" {
+				return nil, d.Errf("account_id specified more than once")
 			}
 			if !d.NextArg() {
-				return nil, d.Errf("account %q: missing api_token value", accountID)
+				return nil, d.Errf("account_id requires an account id")
 			}
-			app.AccountID = accountID
-			app.TunnelAPIToken = d.Val()
+			app.AccountID = d.Val()
 			if d.NextArg() {
 				return nil, d.ArgErr()
 			}

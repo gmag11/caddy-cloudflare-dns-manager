@@ -33,13 +33,15 @@ rules — so a default route can be a catch-all instead of a wildcard DNS record
 2. Permissions: **Account → Cloudflare Tunnel → Edit**.
 3. Account Resources: the account that owns your tunnels.
 
-Declare it as its own `account` line, never mixed with a `zone` line:
+Declare it as its own `account` line, never mixed with a `zone` line. The
+account **id** is not needed: the plugin derives it from the managed zone,
+because Cloudflare only proxies a tunnel for DNS records in the same account.
 
 ```
 {
 	cf_dns_manager {
-		zone example.com api_token {$CF_DNS_TOKEN}     # zone-scoped
-		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}   # account-scoped
+		zone example.com api_token {$CF_DNS_TOKEN}   # zone-scoped
+		account {$CF_TUNNEL_TOKEN}                   # account-scoped
 		tunnel_default_service https://caddy:443
 	}
 }

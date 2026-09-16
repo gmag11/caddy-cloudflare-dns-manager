@@ -86,8 +86,10 @@ per-site directive can reference a host under it. Global settings live here too.
 		# account declares the account-scoped credential used to manage
 		# Cloudflare Tunnel ingress (optional; without it the plugin manages
 		# DNS only and never calls the Tunnel API). The token needs
-		# Account -> Cloudflare Tunnel -> Edit.
-		# account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		# Account -> Cloudflare Tunnel -> Edit. The account id is derived from
+		# the zone, so it is not configured; `account_id` overrides it if ever
+		# needed.
+		# account {$CF_TUNNEL_TOKEN}
 
 		# tunnel_default_service is the destination for tunnel traffic that no
 		# declared host claims: it becomes the tunnel's final catch-all rule.
@@ -186,7 +188,7 @@ writes that hostname's ingress rule on the tunnel:
 {
 	cf_dns_manager {
 		zone example.com api_token {$CF_EXAMPLE}
-		account {$CF_ACCOUNT_ID} api_token {$CF_TUNNEL_TOKEN}
+		account {$CF_TUNNEL_TOKEN}
 		tunnel_default_service https://caddy:443
 	}
 }

@@ -122,17 +122,28 @@ The CNAME exists but the tunnel has no ingress rule matching that hostname.
   yourself in the tunnel configuration, and consider enabling plugin-managed
   ingress so this cannot drift again.
 
-### `tunnel hosts declared but no account credential configured`
+### `tunnel hosts declared but no tunnel API token configured`
 
 Informational, not an error. Tunnel hosts are declared but the global block has
 no `account` line, so the plugin skipped ingress management (it will not call
 the Tunnel API without a credential). Either add:
 
 ```
-account <account-id> api_token <token>   # token needs Account -> Cloudflare Tunnel -> Edit
+account <token>   # token needs Account -> Cloudflare Tunnel -> Edit
 ```
 
 or ignore the line if you maintain the ingress rules yourself.
+
+### `could not determine the Cloudflare account id; skipping tunnel ingress management`
+
+A tunnel token is configured, but no managed zone resolved successfully in this
+run — the zone lookup is what supplies the account id for the Tunnel API path.
+Check the zone errors reported alongside this warning (`zone "..." not found for
+this token`, DNS/API failures). As a workaround, pin the account explicitly:
+
+```
+account_id <account-id>
+```
 
 ### `refusing to manage tunnel ingress: it is locally managed`
 

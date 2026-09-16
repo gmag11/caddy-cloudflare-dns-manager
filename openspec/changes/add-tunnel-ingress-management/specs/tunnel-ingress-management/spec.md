@@ -2,22 +2,37 @@
 
 ### Requirement: Account-scoped tunnel credential
 
-The global `cf_dns_manager` block SHALL accept an optional `account <account-id> api_token <token>` declaration supplying an account-scoped credential for the Cloudflare Tunnel API. When absent, the plugin SHALL NOT call the Tunnel API and SHALL behave exactly as before this capability existed.
+The global `cf_dns_manager` block SHALL accept an optional `account <token>` subdirective supplying an account-scoped credential for the Cloudflare Tunnel API. The account id SHALL be derived from the managed zone's owning account rather than configured, because Cloudflare guarantees a tunnel and its zone share an account. An optional `account_id <account-id>` subdirective SHALL override that derivation. When no `account` subdirective is present, the plugin SHALL NOT call the Tunnel API and SHALL behave exactly as before this capability existed.
 
-#### Scenario: Account declared
+#### Scenario: Account token declared
 
-- **WHEN** the global block declares `account 023e105f4ecef8ad9ca31a8372d0c353 api_token <TOKEN>`
-- **THEN** the plugin may query and update tunnel configurations in that account
+- **WHEN** the global block declares `account <TOKEN>`
+- **THEN** the plugin may query and update tunnel configurations
 
-#### Scenario: Account absent
+#### Scenario: Account id derived from the zone
+
+- **WHEN** a tunnel host is reconciled and the zone lookup reports the zone's owning account id
+- **THEN** Tunnel API requests address that account without the account id being configured
+
+#### Scenario: Account id explicitly overridden
+
+- **WHEN** the global block declares both `account <TOKEN>` and `account_id <account-id>`
+- **THEN** Tunnel API requests address the declared account id rather than the derived one
+
+#### Scenario: Account token absent
 
 - **WHEN** the global block declares no `account` subdirective and a host block declares `tunnel <uuid>`
 - **THEN** no Tunnel API request is made and DNS reconciliation proceeds unchanged
 
-#### Scenario: Account id or token missing
+#### Scenario: Account token missing
 
-- **WHEN** the global block declares `account` with a missing account id or a missing `api_token` value
+- **WHEN** the global block declares `account` with no value
 - **THEN** the adapter rejects the config with an argument error
+
+#### Scenario: Account id not resolvable
+
+- **WHEN** tunnel hosts are declared, an account token is configured, and no zone resolved successfully in that run
+- **THEN** no Tunnel API request is made and the plugin logs a warning naming the cause
 
 ### Requirement: Global default tunnel service
 

@@ -152,14 +152,15 @@ configuration document.
 
 ```
 Reconcile(hosts)
-├─ DNS phase: per-zone goroutines (unchanged)
+├─ DNS phase: per-zone goroutines (unchanged), each returning its account id
 ├─ wg.Wait()
-└─ ingress phase:  skip if no account credential or no tunnel hosts
-   └─ per tunnel (goroutine):
-      ├─ GET  /accounts/{id}/cfd_tunnel/{id}/configurations
-      ├─ derive plan    → declared hosts sorted by FQDN, catch-all last
-      ├─ merge          → preserve foreign rules, replace declared ones
-      └─ PUT (only on drift)
+└─ ingress phase:  skip if no tunnel token or no tunnel hosts
+   └─ resolve account: explicit account_id, else a resolved zone's account
+      └─ per tunnel (goroutine):
+         ├─ GET  /accounts/{id}/cfd_tunnel/{id}/configurations
+         ├─ derive plan    → declared hosts sorted by FQDN, catch-all last
+         ├─ merge          → preserve foreign rules, replace declared ones
+         └─ PUT (only on drift)
 ```
 
 Three properties define the phase:
@@ -199,9 +200,18 @@ The ingress phase uses a second, **account-scoped** credential
 zone-scoped DNS tokens. Its blast radius covers every tunnel in the account,
 which is why it is opt-in: with no `account` line the phase is skipped entirely
 and the plugin makes no Tunnel API call, leaving both behaviour and permissions
-exactly as they were. A locally-managed tunnel (`source: local`) is refused with
-an explanatory error rather than written to, because the running `cloudflared`
-reads only its own `config.yml` and the write would silently do nothing.
+exactly as they were.
+
+The account **id** for the Tunnel API path is not configured. `GET /zones` —
+the lookup the DNS phase already performs — returns the zone's owning
+`account.id`, and a tunnel necessarily shares its zone's account (Cloudflare
+only proxies a `cfargotunnel.com` CNAME for records in the same account). Each
+zone goroutine returns that id, and the ingress phase picks one deterministically
+(the smallest zone name) unless `account_id` pins it.
+
+A locally-managed tunnel (`source: local`) is refused with an explanatory error
+rather than written to, because the running `cloudflared` reads only its own
+`config.yml` and the write would silently do nothing.
 
 The ownership tag travels in the record `comment` field (Cloudflare allows one
 comment per record), which is why every write sets `Comment: tag`.

@@ -12,6 +12,7 @@ Verified facts this design rests on:
 - `PUT .../configurations` accepts only `config.ingress[]` and `config.originRequest[]`. The response also carries `source: "local" | "cloudflare"` and a `version`.
 - A catch-all (no `hostname`) is mandatory in the written configuration, both for `config.yml` and per the API guide. The dashboard UI does not require it, but the plugin writes via API.
 - Remotely-managed tunnels are synchronised by `cloudflared` itself (`config_version` is documented as "used internally to sync cloudflared with the Zero Trust dashboard"), so no local reload is needed. `--config`/`--origincert` are "for locally-managed tunnels only"; `--token` is "for remotely-managed tunnels only". Cloudflare recommends remotely-managed tunnels "for most use cases".
+- `GET /zones?name=<zone>` returns the zone's owning `account.id`, so the Tunnel API path needs no configured account id (see D1b).
 
 Relevant existing code:
 
@@ -41,15 +42,27 @@ Relevant existing code:
 
 ## Decisions
 
-### D1: Account credential is optional and additive
+### D1: Account credential is optional, additive and token-only
 
-`account <id> api_token <token>` is a **separate** credential from the per-zone DNS tokens, both in config shape and in code path. Without it, the plugin makes zero Tunnel API calls and behaves byte-for-byte as today; a tunnel host's ingress is left alone and a log line explains why.
+`account <token>` is a **separate** credential from the per-zone DNS tokens, both in config shape and in code path. Without it, the plugin makes zero Tunnel API calls and behaves byte-for-byte as today; a tunnel host's ingress is left alone and a log line explains why.
 
 *Rationale*: the account token carries `Cloudflare Tunnel Write`, which can reconfigure **every tunnel in the account** — a materially larger blast radius than a zone-scoped `DNS Write`. Coupling it to DNS management would silently escalate the permissions of every existing deployment. Keeping it opt-in means the default posture is unchanged.
 
 *Alternative rejected*: piggyback the account token on each `zone` entry. It would duplicate a single account credential across zones and blur the DNS/tunnel permission boundary.
 
 *Alternative rejected*: a global "manage ingress" boolean with a mandatory account token. It makes the credential mandatory, forcing every user to accept the blast radius.
+
+### D1b: The account id is derived, not configured
+
+The Tunnel configuration endpoint is `/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations` — the account id is a path parameter the API does not infer from the token. Rather than requiring the user to supply it, the plugin takes it from the zone lookup it already performs for reconciliation: `GET /zones?name=<zone>` returns `result[0].account.id`.
+
+*Rationale*: the derivation is **exact, not a heuristic**. Cloudflare only proxies traffic through a `cfargotunnel.com` CNAME for DNS records in the same account, so a working tunnel and its zone necessarily share an account. Verified against a real zone-scoped token: the lookup returns the owning account id even though the token has no account-level permission.
+
+*Consequences*: one fewer config field, and one fewer failure mode (a wrong account id would surface as an opaque 403/404 from the Tunnel API). `account_id <id>` remains as an escape hatch for the case where the derivation cannot work — e.g. every zone lookup failing while ingress must still be managed.
+
+*Alternative rejected*: `GET /accounts` to enumerate the token's accounts. Unverified whether a `Cloudflare Tunnel Write` token can list accounts, and it would add an API call for information the zone lookup already returns.
+
+*Alternative rejected*: decode the account id from the `cloudflared` run token (its payload contains `a`). The plugin never sees that token — it belongs to the `cloudflared` process, not the Caddy config.
 
 ### D2: Ordering is derived, not arbitrary
 

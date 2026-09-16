@@ -47,10 +47,18 @@ type cfAPIError struct {
 	Message string `json:"message"`
 }
 
-// cfZone is the subset of the zone object we need.
+// cfZone is the subset of the zone object we need. Account carries the owning
+// account id, which the tunnel API path requires; Cloudflare guarantees a
+// tunnel and its zone live in the same account (a cfargotunnel.com CNAME only
+// proxies records in the same account), so deriving it here is exact rather
+// than a guess — and saves the user from configuring it.
 type cfZone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Account struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"account"`
 }
 
 // cfDNSRecord is the subset of a DNS record we use.
@@ -130,8 +138,9 @@ func formatCFErrors(errs []cfAPIError) string {
 	return b.String()
 }
 
-// zoneIDByName resolves a zone apex to its Cloudflare zone ID.
-func (c *cloudflareClient) zoneIDByName(ctx context.Context, zone string) (string, error) {
+// zoneByName resolves a zone apex to its Cloudflare zone ID and owning account
+// ID in the single lookup already needed for reconciliation.
+func (c *cloudflareClient) zoneByName(ctx context.Context, zone string) (zoneID, accountID string, err error) {
 	u := url.URL{
 		Path: "/zones",
 	}
@@ -140,14 +149,14 @@ func (c *cloudflareClient) zoneIDByName(ctx context.Context, zone string) (strin
 	q.Set("per_page", "1")
 	var zones []cfZone
 	if err := c.do(ctx, http.MethodGet, "/zones?"+q.Encode(), nil, &zones); err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, z := range zones {
 		if z.Name == zone {
-			return z.ID, nil
+			return z.ID, z.Account.ID, nil
 		}
 	}
-	return "", fmt.Errorf("zone %q not found for this token", zone)
+	return "", "", fmt.Errorf("zone %q not found for this token", zone)
 }
 
 // listRecords lists the A, AAAA and CNAME records in a zone. The Cloudflare

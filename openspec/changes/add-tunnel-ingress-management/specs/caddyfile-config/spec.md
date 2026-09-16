@@ -2,12 +2,17 @@
 
 ### Requirement: Global account credential for tunnel ingress
 
-The plugin SHALL accept an optional `account <account-id> api_token <token>` subdirective in the global `cf_dns_manager` block, declaring the account-scoped credential used to manage Cloudflare Tunnel ingress. The account credential SHALL be handled independently from zone credentials: zone tokens SHALL remain zone-scoped, and the account credential SHALL be used only for Tunnel API calls.
+The plugin SHALL accept an optional `account <token>` subdirective in the global `cf_dns_manager` block, declaring the account-scoped credential used to manage Cloudflare Tunnel ingress. It SHALL also accept an optional `account_id <account-id>` subdirective overriding the derived account id. The account credential SHALL be handled independently from zone credentials: zone tokens SHALL remain zone-scoped, and the account credential SHALL be used only for Tunnel API calls.
 
 #### Scenario: Account subdirective parsed
 
-- **WHEN** the global block contains `account <id> api_token <token>`
-- **THEN** the adapted config carries the account id and token in the app configuration
+- **WHEN** the global block contains `account <token>`
+- **THEN** the adapted config carries the token in the app configuration
+
+#### Scenario: Account id subdirective parsed
+
+- **WHEN** the global block contains `account_id <account-id>`
+- **THEN** the adapted config carries the account id as an override
 
 #### Scenario: Account subdirective optional
 
@@ -16,7 +21,7 @@ The plugin SHALL accept an optional `account <account-id> api_token <token>` sub
 
 #### Scenario: Zone tokens unaffected
 
-- **WHEN** the global block declares both `zone ... api_token ...` and `account ... api_token ...`
+- **WHEN** the global block declares both `zone ... api_token ...` and `account ...`
 - **THEN** DNS operations use the zone token and Tunnel operations use the account token
 
 ### Requirement: Global tunnel default service option
