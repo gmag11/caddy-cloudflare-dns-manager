@@ -24,9 +24,9 @@ coverage.*
 .env.*
 !.env.example
 
-# cloudflared tunnel credentials and origin cert (testenv)
-testenv/tunnel/cert.pem
-testenv/tunnel/*.json
+# cloudflared locally-managed tunnel credentials and origin cert (legacy: the
+# testenv tunnel is remotely-managed, so these are no longer produced)
+testenv/tunnel/
 
 # Editor/OS
 .idea/

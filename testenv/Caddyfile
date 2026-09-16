@@ -14,6 +14,18 @@
 		# touched.
 		zone {$CF_ZONE} api_token {$CF_API_TOKEN} prune
 
+		# Account-scoped token for the Tunnel API, needed to write the tunnel's
+		# ingress plan. Its blast radius covers every tunnel in the account, so
+		# it is a separate, opt-in credential. The account id is derived from
+		# the zone below (a tunnel always lives in its zone's account).
+		account {$CF_ACCOUNT_TUNNEL_TOKEN}
+
+		# Default destination for tunnel traffic that no declared host claims.
+		# It becomes the tunnel's final catch-all rule, which is why no
+		# wildcard DNS record is needed for the zone. Unset, the plugin writes
+		# http_status:404 (fail closed) instead of guessing an origin.
+		tunnel_default_service https://caddy:443
+
 		# Optional: override the public IPv4 detection endpoint.
 		# ip_url https://ifconfig.me/ip
 
@@ -45,15 +57,19 @@
 	}
 
 	# Tunnel-backed host. The plugin reconciles a proxied CNAME to
-	# <CF_TUNNEL_ID>.cfargotunnel.com (no A/AAAA, no proxied/ip directives).
-	# force_adopt adopts the CNAME created manually by
-	# `cloudflared tunnel route dns`, if present. Traffic path: visitor ->
-	# CF edge -> cloudflared container -> caddy:443 (see tunnel/config.yml).
+	# <CF_TUNNEL_ID>.cfargotunnel.com (no A/AAAA, no proxied/ip directives)
+	# and writes this hostname's ingress rule on the tunnel. The tunnel is
+	# remotely-managed, so no config.yml is involved: the plugin owns the
+	# ingress plan. force_adopt adopts a CNAME created outside the plugin
+	# (e.g. by the dashboard), if one exists.
+	# Traffic path: visitor -> CF edge -> cloudflared container -> caddy:443.
 	@git host git.{$CF_ZONE}
 	handle @git {
 		cf_dns_manager {
 			host @git
 			tunnel {$CF_TUNNEL_ID}
+			# Optional per-host destination, overriding the global default.
+			# tunnel_service ssh://caddy:22
 			force_adopt
 		}
 		respond "git.{$CF_ZONE} OK (tunnel)" 200

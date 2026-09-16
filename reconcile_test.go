@@ -38,6 +38,76 @@ func testApp(t *testing.T, m *mockCloudflare, publicIP string, ipHosts bool) (*A
 	return app, detSrv
 }
 
+// TestRevertTunnelToAddressDropsRoute covers the tunnel -> address switch: the
+// CNAME is always deleted (Cloudflare forbids it coexisting with A/AAAA), but
+// the route is only cleaned up when the zone opted into prune.
+func TestRevertTunnelToAddressDropsRoute(t *testing.T) {
+	for _, prune := range []bool{true, false} {
+		name := "no-prune"
+		if prune {
+			name = "prune"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Seed the name with the owned CNAME a tunnel host would have left.
+			m := newMockCloudflare(t, "example.com", []cfDNSRecord{
+				{Name: "app", Type: "CNAME", Content: testTunnelA + ".cfargotunnel.com", Proxied: true, Comment: "caddy-cf-dns:test-host"},
+			})
+			m.zonePrune = prune
+
+			ta := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+				Ingress: []cfIngressRule{
+					{Hostname: "app.example.com", Service: "https://caddy:443"},
+					{Service: "https://caddy:443"},
+				},
+			})
+
+			app, _ := testApp(t, m, "203.0.113.10", true)
+			app.AccountID = "acct-1"
+			app.TunnelAPIToken = "token-1"
+			app.TunnelDefaultService = "https://caddy:443"
+			app.apiBase = combinedServer(t, m, ta)
+
+			// The host is now declared as an address host, not a tunnel host.
+			// Another host keeps the tunnel declared so the phase reaches it.
+			hosts := []HostConfig{
+				{Host: "app.example.com", Proxied: boolPtr(true), ZoneConfig: ZoneConfig{Zone: "example.com", APIToken: "token"}},
+				{Host: "git.example.com", TunnelID: testTunnelA, ZoneConfig: ZoneConfig{Zone: "example.com", APIToken: "token"}},
+			}
+			if err := app.Reconcile(hosts); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			// The CNAME is gone either way; that is not a prune decision.
+			if rec := m.recordByNameType("app", "CNAME"); rec != nil {
+				t.Error("revert must delete the CNAME regardless of the prune opt-in")
+			}
+
+			// The route follows the opt-in.
+			var routePresent bool
+			if ta.putCount() > 0 {
+				for _, r := range ta.lastPut().Ingress {
+					if r.Hostname == "app.example.com" {
+						routePresent = true
+					}
+				}
+			} else {
+				// No write happened, so the route is still what was seeded.
+				for _, r := range ta.storedConfig().Ingress {
+					if r.Hostname == "app.example.com" {
+						routePresent = true
+					}
+				}
+			}
+			if prune && routePresent {
+				t.Error("with prune enabled the reverted host's route must be deleted")
+			}
+			if !prune && !routePresent {
+				t.Error("without prune the route must be preserved")
+			}
+		})
+	}
+}
+
 func TestReconcileCreatesMissing(t *testing.T) {
 	m := newMockCloudflare(t, "example.com", nil)
 	app, _ := testApp(t, m, "203.0.113.10", true)

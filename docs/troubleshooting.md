@@ -110,9 +110,112 @@ automated in a tight loop.
 
 ### Host resolves but returns 404 from `server: cloudflare`
 
-The CNAME exists (plugin did its part) but the tunnel has no ingress rule for
-that hostname. Add it to the tunnel configuration (dashboard route or
-`config.yml`) and recreate/restart `cloudflared`.
+The CNAME exists but the tunnel has no ingress rule matching that hostname.
+
+- **With the `account` block (plugin-managed ingress):** the plugin should have
+  written the rule. Check the log for `wrote tunnel ingress plan`; if it is
+  missing, the host is probably not declared with `tunnel <uuid>` in its
+  `cf_dns_manager` block. A 404 can also mean an earlier catch-all rule (a
+  preserved foreign wildcard) is matching first — look for the
+  `preserved wildcard ingress rule shadows a declared host` warning.
+- **Without the `account` block:** the plugin manages DNS only. Add the rule
+  yourself in the tunnel configuration, and consider enabling plugin-managed
+  ingress so this cannot drift again.
+
+### `tunnel hosts declared but no tunnel API token configured`
+
+Informational, not an error. Tunnel hosts are declared but the global block has
+no `account` line, so the plugin skipped ingress management (it will not call
+the Tunnel API without a credential). Either add:
+
+```
+account <token>   # token needs Account -> Cloudflare Tunnel -> Edit
+```
+
+or ignore the line if you maintain the ingress rules yourself.
+
+### `could not determine the Cloudflare account id; skipping tunnel ingress management`
+
+A tunnel token is configured, but no managed zone resolved successfully in this
+run — the zone lookup is what supplies the account id for the Tunnel API path.
+Check the zone errors reported alongside this warning (`zone "..." not found for
+this token`, DNS/API failures). As a workaround, pin the account explicitly:
+
+```
+account_id <account-id>
+```
+
+### `refusing to manage tunnel ingress: it is locally managed`
+
+The tunnel's configuration reports `source: local`, meaning its ingress lives in
+a `config.yml` on the machine running `cloudflared`. Writing through the API
+would report success and change nothing, so the plugin refuses rather than
+pretending. Recreate the tunnel as remotely-managed, or drop the `account` block
+and keep maintaining `config.yml` yourself.
+
+### A removed host still appears in the tunnel's Routes
+
+Expected in these cases. The plugin removes a route automatically only when it
+also deletes that hostname's DNS record in the same run, and only in a
+`prune`-enabled zone:
+
+- **The zone has no `prune`.** Nothing is deleted, so there is nothing to
+  correlate with. Enable `prune` on the zone and reload.
+- **The host was switched from `tunnel` to `ip` without `prune`.** The CNAME had
+  to go — Cloudflare forbids it coexisting with an address record — but the
+  route is only cleaned up under `prune`. It is now unreachable (the name
+  resolves to your address, not through the tunnel) and no later run will touch
+  it, so delete it by hand if it bothers you.
+- **This was the last tunnel host of the config.** With no tunnel declared the
+  plugin cannot tell which tunnel holds the route, and it will not scan the
+  account's tunnels to find out; the log says so explicitly. Delete it by hand
+  in the dashboard.
+
+### A route was pruned and I want it back
+
+Re-declare the host with `tunnel <uuid>`. Both halves are recreated from the
+same declaration: the DNS record and the route. Prune is not reversible on its
+own, which is why it only ever removes routes whose record it deleted moments
+earlier.
+
+### An undeclared subdomain resolves
+
+The plugin never creates a wildcard DNS record, so a `*.<zone>` record came from
+elsewhere — most often the dashboard's **Published application** flow, which
+creates the DNS record alongside the ingress rule when you give it a wildcard
+hostname. The record has no ownership tag, so the plugin will neither update nor
+prune it: delete it in the dashboard. After that, only hostnames you declare
+resolve.
+
+> Note the distinction: a `*.<zone>` **Caddy site block** is unrelated and
+> should stay — it is how Caddy serves every subdomain with one certificate. The
+> problem is the DNS record, not the site block.
+
+### 522 or `remote error: tls: internal error` through the tunnel
+
+The ingress rule points at an HTTPS origin, but `cloudflared` presents the wrong
+SNI. By default it uses the *service URL's* hostname — so `service:
+https://caddy:443` sends SNI `caddy`, and a Caddy site using a wildcard
+certificate (`*.example.com`) has no certificate for that name. The handshake
+fails and every request becomes a 502/522.
+
+**The plugin sets `originRequest.matchSNItoHost: true` on every rule whose
+service is `https://`, so this should not happen.** If you still see it:
+
+- Check the rule's service scheme. The option is only added for `https://`; a
+  plain `http://` origin performs no TLS handshake and never needed it.
+- Check whether something external rewrote the route. The plugin repairs a
+  missing option on the next reconcile, so a single reload should clear it.
+- If a rule carries `originServerName`, that pins the SNI deliberately. The
+  plugin does not remove it, and the two options can conflict — drop one.
+
+```
+# cloudflared log
+error="Unable to reach the origin service ... remote error: tls: internal error" ingressRule=0 originService=https://caddy:443
+```
+
+This is the same underlying cause as the redirect-loop entry below, from the
+other side: one is the wrong port, this one is the wrong SNI.
 
 ### 308 redirect loop through the edge
 
@@ -131,6 +234,8 @@ reload once more or restart Caddy. (`docker compose restart caddy` is enough.)
 
 A valid-UUID typo creates a CNAME to a tunnel that does not exist. The edge
 rejects or black-holes it. Verify the UUID against `cloudflared tunnel list`.
+With plugin-managed ingress, a wrong UUID also means the plugin wrote the ingress
+plan to a *different* tunnel — fix the UUID and reload so it is corrected.
 
 ## General
 

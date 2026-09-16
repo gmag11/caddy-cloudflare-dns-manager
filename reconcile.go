@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -65,6 +66,16 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		errs  []error
 	)
 
+	// accountByZone captures the owning account id of each reconciled zone, as
+	// reported by the zone lookup. The ingress phase needs it for the Tunnel
+	// API path, and this avoids a second lookup.
+	// prunedHosts collects, per zone, the hostnames whose DNS records this run
+	// pruned: their routes can no longer receive traffic and are the only ones
+	// the ingress phase is allowed to delete.
+	var acctMu sync.Mutex
+	accountByZone := make(map[string]string)
+	prunedByZone := make(map[string][]string)
+
 	for zkey, zoneHosts := range byZone {
 		cli, ok := zoneClients[zkey]
 		if !ok {
@@ -75,19 +86,115 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 		go func(zone string, cli *cloudflareClient, zoneHosts []HostConfig) {
 			defer wg.Done()
 			det := familyDetection{ipv4: publicIP, ipv6: publicIP6, ipv4Failed: ipDetectionFailed, ipv6Failed: ip6DetectionFailed}
-			if err := app.reconcileZone(ctx, cli, zone, zoneHosts, det); err != nil {
+			res, err := app.reconcileZone(ctx, cli, zone, zoneHosts, det)
+			if err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
+			}
+			acctMu.Lock()
+			defer acctMu.Unlock()
+			if res.accountID != "" {
+				accountByZone[zone] = res.accountID
+			}
+			if len(res.prunedHosts) > 0 {
+				prunedByZone[zone] = res.prunedHosts
 			}
 		}(zkey, cli, zoneHosts)
 	}
 	wg.Wait()
 
+	// Tunnel ingress is reconciled after DNS, in its own phase: a tunnel's
+	// hosts can span zones, so it cannot be folded into the per-zone fan-out
+	// without fragmenting one tunnel's plan across concurrent writes. Failures
+	// here are aggregated alongside zone failures, never fatal, so a Tunnel
+	// API problem cannot leave DNS unreconciled.
+	if err := app.reconcileIngressPhase(ctx, hosts, accountByZone, prunedByZone); err != nil {
+		errs = append(errs, err)
+	}
+
 	if len(errs) > 0 {
-		return fmt.Errorf("%d zone(s) failed: %v", len(errs), errs)
+		return fmt.Errorf("%d reconcile operation(s) failed: %v", len(errs), errs)
 	}
 	return nil
+}
+
+// reconcileIngressPhase runs the tunnel ingress reconciliation when a tunnel
+// token and at least one tunnel host are configured. Without the token the
+// plugin must not call the Tunnel API at all, so the phase is skipped with an
+// explanatory log line rather than failing.
+//
+// accountByZone carries the owning account id discovered during the DNS phase.
+// Cloudflare requires a tunnel and its zone to share an account — a
+// cfargotunnel.com CNAME only proxies records in the same account — so the
+// zone's account is the tunnel's account, and the user does not have to
+// configure it.
+//
+// prunedByZone carries the hostnames whose DNS records the DNS phase deleted.
+// Their routes are the only ones this phase may delete: the DNS record the
+// route depended on is gone, so the route can no longer receive traffic.
+// Nothing is inferred from the route itself.
+func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig, accountByZone map[string]string, prunedByZone map[string][]string) error {
+	tunnelHosts := 0
+	for _, hc := range hosts {
+		if hc.TunnelID != "" {
+			tunnelHosts++
+		}
+	}
+	// The phase also runs when there is nothing declared, so a tunnel that just
+	// lost its last host still gets its orphaned route cleaned up.
+	if tunnelHosts == 0 && len(prunedByZone) == 0 {
+		return nil
+	}
+
+	if app.TunnelAPIToken == "" {
+		if tunnelHosts > 0 {
+			app.logger.Info("tunnel hosts declared but no tunnel API token configured; skipping tunnel ingress management",
+				zap.Int("tunnel_hosts", tunnelHosts),
+				zap.String("hint", "add `account <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
+		}
+		return nil
+	}
+
+	accountID := app.resolveAccountID(accountByZone)
+	if accountID == "" {
+		app.logger.Warn("could not determine the Cloudflare account id; skipping tunnel ingress management",
+			zap.Int("tunnel_hosts", tunnelHosts),
+			zap.String("cause", "no managed zone resolved successfully in this run"))
+		return nil
+	}
+
+	// Flatten the per-zone pruned hostnames into one set: a route may point at
+	// a hostname in any declared zone, and membership is all that matters.
+	pruned := make(map[string]bool)
+	for _, names := range prunedByZone {
+		for _, n := range names {
+			pruned[strings.ToLower(n)] = true
+		}
+	}
+
+	cli := newTunnelClientWithBase(app.apiBase, accountID, app.TunnelAPIToken)
+	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, pruned, app.logger)
+}
+
+// resolveAccountID returns the account id for tunnel API calls. An explicit
+// AccountID always wins; otherwise the account of any zone that resolved in
+// this run is used, since a tunnel necessarily lives in its zone's account.
+// When several zones resolved, the lexicographically smallest key is taken so
+// the choice is deterministic.
+func (app *App) resolveAccountID(accountByZone map[string]string) string {
+	if app.AccountID != "" {
+		return app.AccountID
+	}
+	zones := make([]string, 0, len(accountByZone))
+	for z := range accountByZone {
+		zones = append(zones, z)
+	}
+	if len(zones) == 0 {
+		return ""
+	}
+	sort.Strings(zones)
+	return accountByZone[zones[0]]
 }
 
 // familyDetection carries the shared public-IP detection results for one
@@ -156,22 +263,34 @@ func (app *App) detectPublicIPs(ctx context.Context, hosts []HostConfig) (ipv4, 
 	return ipv4, ipv6, ipv4Failed, ipv6Failed
 }
 
-// reconcileZone reconciles all hosts in one zone, then prunes if enabled.
+// reconcileZoneResult carries what the per-zone pass learned that later phases
+// need: the zone's owning account (for the Tunnel API path) and the hostnames
+// whose DNS records this pass pruned (so the ingress phase can delete the
+// matching now-unreachable routes).
+type reconcileZoneResult struct {
+	accountID   string
+	prunedHosts []string
+}
+
+// reconcileZone reconciles all hosts in one zone, then prunes if enabled. It
+// returns the zone's owning account id (empty when the lookup failed) and the
+// hostnames pruned in this pass, so the ingress phase can address the Tunnel
+// API without a second lookup and clean up routes that just became unreachable.
 func (app *App) reconcileZone(
 	ctx context.Context,
 	cli *cloudflareClient,
 	zone string,
 	hosts []HostConfig,
 	det familyDetection,
-) error {
-	zoneID, err := cli.zoneIDByName(ctx, zone)
+) (reconcileZoneResult, error) {
+	zoneID, accountID, err := cli.zoneByName(ctx, zone)
 	if err != nil {
-		return fmt.Errorf("zone %q: %v", zone, err)
+		return reconcileZoneResult{}, fmt.Errorf("zone %q: %v", zone, err)
 	}
 
 	records, err := cli.listRecords(ctx, zoneID)
 	if err != nil {
-		return fmt.Errorf("zone %q: listing records: %v", zone, err)
+		return reconcileZoneResult{accountID: accountID}, fmt.Errorf("zone %q: listing records: %v", zone, err)
 	}
 
 	// Canonical map from zone-relative record name ("@", "foo", "a.b") and
@@ -194,6 +313,12 @@ func (app *App) reconcileZone(
 	managed := make(map[string]map[string]bool)
 
 	tag := app.ownershipTag()
+
+	// clearedNames collects hostnames whose CNAME this pass deleted to make
+	// room for address records (a tunnel-to-address revert). Those routes can
+	// no longer receive traffic, so they join the prune set the ingress phase
+	// consumes.
+	var clearedNames []string
 
 	for _, hc := range hosts {
 		name := recordName(hc.Host, zone)
@@ -219,12 +344,20 @@ func (app *App) reconcileZone(
 		// rejected with code 81054) and prune only removes the CNAME
 		// afterwards, leaving the name with no record.
 		var clearErr error
-		records, clearErr = app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+		var clearedCNAME bool
+		records, clearedCNAME, clearErr = app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
 			"address records", map[string]bool{"CNAME": true}, records, tag)
 		if clearErr != nil {
 			app.logger.Error("reconcile host failed",
 				zap.String("host", hc.Host), zap.String("zone", zone), zap.String("record_type", "CNAME"), zap.Error(clearErr))
 			continue
+		}
+		// Reverting a host from tunnel-backed to an address host deletes the
+		// CNAME here rather than in the prune pass. The route it served is now
+		// unreachable, so report the name the same way prune does and let the
+		// ingress phase clean it up.
+		if clearedCNAME {
+			clearedNames = append(clearedNames, hc.Host)
 		}
 
 		// A is always managed for a declared host.
@@ -256,12 +389,25 @@ func (app *App) reconcileZone(
 		}
 	}
 
+	// Names whose CNAME was deleted to make room for address records are only
+	// reported when the zone opted into prune. Deleting the *record* is not
+	// optional — Cloudflare forbids a CNAME coexisting with A/AAAA, so a revert
+	// must remove it — but deleting the *route* is a cleanup decision, and
+	// `prune` is the operator's single switch for "this plugin may delete my
+	// routes". Without it the route is left in place and goes stale, which is
+	// documented in troubleshooting.
+	var prunedNames []string
 	if app.zonePruneEnabled(zone) {
-		if err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag); err != nil {
-			return fmt.Errorf("zone %q: prune: %v", zone, err)
+		names, err := app.pruneZone(ctx, cli, zone, zoneID, records, managed, tag)
+		// Report whatever was pruned before a failure, plus the cleared names,
+		// so the ingress phase still cleans up routes whose records are gone.
+		prunedNames = append(names, clearedNames...)
+		if err != nil {
+			return reconcileZoneResult{accountID: accountID, prunedHosts: prunedNames},
+				fmt.Errorf("zone %q: prune: %v", zone, err)
 		}
 	}
-	return nil
+	return reconcileZoneResult{accountID: accountID, prunedHosts: prunedNames}, nil
 }
 
 // markManaged records that the declared config asks the plugin to manage a
@@ -293,7 +439,9 @@ func (app *App) reconcileTunnelHost(
 	// Clear address records that would block CNAME creation. Owned records are
 	// deleted unconditionally; untagged ones require force_adopt (adoption of
 	// the name), otherwise the CNAME cannot be created and the user is told.
-	kept, err := app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
+	// A deleted CNAME is not possible here (CNAME is not in the blocking set),
+	// so the flag is discarded.
+	kept, _, err := app.clearConflictingRecords(ctx, cli, hc, zone, zoneID, name, key,
 		"tunnel CNAME", map[string]bool{"A": true, "AAAA": true}, records, tag)
 	if err != nil {
 		return kept, err
@@ -321,8 +469,13 @@ func (app *App) reconcileTunnelHost(
 // records are deleted unconditionally; untagged ones are only deleted when
 // force_adopt is set, otherwise an error is returned (and the named records
 // are left untouched). desiredType only labels log messages. It returns the
-// records snapshot with deleted entries removed so a later prune does not
-// retry those deletions.
+// records snapshot with deleted entries removed (so a later prune does not
+// retry those deletions) and whether it deleted a CNAME at that name.
+//
+// The CNAME flag is what tells the ingress phase that the route for this
+// hostname can no longer receive traffic: switching a host from tunnel to
+// address records removes the CNAME here, not in the prune pass, so the
+// correlation has to travel back the same way the pruned-name set does.
 func (app *App) clearConflictingRecords(
 	ctx context.Context,
 	cli *cloudflareClient,
@@ -332,10 +485,10 @@ func (app *App) clearConflictingRecords(
 	blockingTypes map[string]bool,
 	records []cfDNSRecord,
 	tag string,
-) ([]cfDNSRecord, error) {
+) (kept []cfDNSRecord, deletedCNAME bool, err error) {
 	log := app.logger.With(zap.String("host", hc.Host), zap.String("zone", zone))
 
-	kept := make([]cfDNSRecord, 0, len(records))
+	kept = make([]cfDNSRecord, 0, len(records))
 	var blocked error
 	for i := range records {
 		r := &records[i]
@@ -361,12 +514,15 @@ func (app *App) clearConflictingRecords(
 			kept = append(kept, *r)
 			continue
 		}
+		if r.Type == "CNAME" {
+			deletedCNAME = true
+		}
 		log.Info("deleted conflicting record to make room for the desired type",
 			zap.String("record_id", r.ID), zap.String("record_type", r.Type),
 			zap.String("content", r.Content), zap.String("desired", desiredType),
 			zap.String("fqdn", hc.Host))
 	}
-	return kept, blocked
+	return kept, deletedCNAME, blocked
 }
 
 // reconcileFamily handles a single (host, record type) pair against its
@@ -501,7 +657,11 @@ func resolveFamilyIP(literal, detected string, detectionFailed bool) (string, bo
 }
 
 // pruneZone deletes records tagged with this instance whose (name, type) is
-// not managed by the declared configuration.
+// not managed by the declared configuration. It returns the hostnames it
+// deleted, so the tunnel ingress pass can delete the matching route: a route
+// whose DNS record this plugin just removed can no longer receive traffic, and
+// that makes it safe to delete without needing an ownership marker on the
+// route itself.
 func (app *App) pruneZone(
 	ctx context.Context,
 	cli *cloudflareClient,
@@ -509,7 +669,8 @@ func (app *App) pruneZone(
 	records []cfDNSRecord,
 	managed map[string]map[string]bool,
 	tag string,
-) error {
+) ([]string, error) {
+	var deletedNames []string
 	for i := range records {
 		r := &records[i]
 		if !isOwnedByInstance(r.Comment, tag) {
@@ -520,8 +681,9 @@ func (app *App) pruneZone(
 			continue
 		}
 		if err := cli.deleteRecord(ctx, zoneID, r.ID); err != nil {
-			return fmt.Errorf("deleting orphan %s (%s): %v", r.Name, r.ID, err)
+			return deletedNames, fmt.Errorf("deleting orphan %s (%s): %v", r.Name, r.ID, err)
 		}
+		deletedNames = append(deletedNames, fqdn(r.Name, zone))
 		app.logger.Info("pruned orphan record",
 			zap.String("fqdn", fqdn(r.Name, zone)),
 			zap.String("name", key),
@@ -530,7 +692,7 @@ func (app *App) pruneZone(
 			zap.String("content", r.Content),
 			zap.String("record_id", r.ID))
 	}
-	return nil
+	return deletedNames, nil
 }
 
 // fqdn returns the fully-qualified form of a record name relative to zone.

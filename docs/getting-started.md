@@ -13,15 +13,46 @@ The plugin needs one token per managed zone, scoped as narrowly as possible:
 3. Zone Resources: **Include → Specific zone → example.com**.
 4. Create and copy the token (shown once).
 
-That is all the plugin needs. It never requires Account-level permissions:
+That is all the plugin needs for DNS record management:
 
 | Permission | Needed for |
 | --- | --- |
-| Zone → DNS → Edit | everything the plugin does (read, create, update, delete) |
-| Account → any | **not needed** — tunnels are managed by `cloudflared`, not the plugin |
+| Zone → DNS → Edit | DNS records: read, create, update, delete |
+| Account → Cloudflare Tunnel → Edit | **optional**, only for tunnel ingress management |
 
 If you manage several zones with separate tokens, declare one `zone` line per
 token (below). One token with Edit on several zones also works.
+
+### Optional: managing tunnel ingress
+
+If you declare tunnel-backed hosts and want the plugin to write their ingress
+rules — so a default route can be a catch-all instead of a wildcard DNS record
+— it additionally needs an **account-scoped** token:
+
+1. **My Profile → API Tokens → Create Custom Token**.
+2. Permissions: **Account → Cloudflare Tunnel → Edit**.
+3. Account Resources: the account that owns your tunnels.
+
+Declare it as its own `account` line, never mixed with a `zone` line. The
+account **id** is not needed: the plugin derives it from the managed zone,
+because Cloudflare only proxies a tunnel for DNS records in the same account.
+
+```
+{
+	cf_dns_manager {
+		zone example.com api_token {$CF_DNS_TOKEN}   # zone-scoped
+		account {$CF_TUNNEL_TOKEN}                   # account-scoped
+		tunnel_default_service https://caddy:443
+	}
+}
+```
+
+> **Read this before enabling it.** The account token can reconfigure **every
+> tunnel in the account** — the same blast radius as `cloudflared`'s `cert.pem`
+> — whereas the zone token only reaches the zones you list. That asymmetry is
+> why ingress management is opt-in: **omit the `account` line and the plugin
+> makes no Tunnel API call at all**, leaving both its behaviour and its
+> permissions exactly as they were.
 
 **Rotating a token:** create the new token, update the `api_token` in the
 Caddyfile, reload. The old token can be revoked immediately after the reload —
