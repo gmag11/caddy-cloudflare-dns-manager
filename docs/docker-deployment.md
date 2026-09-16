@@ -215,6 +215,7 @@ the tunnel's ingress plan alongside the DNS records:
 		zone example.com api_token {$CF_EXAMPLE}
 		account {$CF_TUNNEL_TOKEN}
 		tunnel_default_service https://caddy:443
+		tunnel edge {$CF_TUNNEL_ID}
 	}
 }
 ```
@@ -240,9 +241,9 @@ dashboard. Note that the dashboard's **Published application** flow also creates
 the DNS record without the plugin's ownership tag, which the plugin will then
 neither update nor prune. Two ways to avoid that:
 
-- create the DNS record with the plugin (declare the host with `tunnel <uuid>`)
+- create the DNS record with the plugin (register the tunnel in the global block and declare the host with `tunnel <name>`)
   and add only the ingress rule in the dashboard; or
-- declare the host with `tunnel <uuid>` **and** give the plugin the `account`
+- declare the host with `tunnel <name>` **and** give the plugin the `account`
   credential, so it writes both halves itself.
 
 Full reference:
@@ -257,7 +258,7 @@ CNAME; `cloudflared` handles the transport:
 handle @app {
 	cf_dns_manager {
 		host @app
-		tunnel {$CF_TUNNEL_ID}
+		tunnel edge      # registered in the global block
 		force_adopt
 	}
 	reverse_proxy localhost:8080

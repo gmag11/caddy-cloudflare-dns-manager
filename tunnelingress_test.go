@@ -355,8 +355,12 @@ func newIngressTestApp(t *testing.T, m *mockTunnelAPI, defaultService string) *A
 		TunnelDefaultService: defaultService,
 		TagPrefix:            "caddy-cf-dns",
 		Instance:             "test-host",
-		logger:               zap.NewNop(),
-		apiBase:              m.server(t),
+		Tunnels: []TunnelConfig{
+			{Name: "a", ID: testTunnelA},
+			{Name: "b", ID: testTunnelB},
+		},
+		logger:  zap.NewNop(),
+		apiBase: m.server(t),
 	}
 }
 
@@ -705,11 +709,12 @@ func TestIngressWarnsOnShadowingWildcard(t *testing.T) {
 // --- route prune, keyed off the DNS record ----------------------------------
 
 // runIngressPruning drives the phase the way Reconcile does when the DNS pass
-// pruned the given names.
+// pruned the given names. Each name is attributed to the tunnel the deleted
+// CNAME pointed at, which is how a real run learns it.
 func runIngressPruning(app *App, hosts []HostConfig, prunedNames ...string) error {
-	pruned := map[string][]string{}
-	if len(prunedNames) > 0 {
-		pruned["example.com"] = prunedNames
+	pruned := map[string][]prunedName{}
+	for _, name := range prunedNames {
+		pruned["example.com"] = append(pruned["example.com"], prunedName{Host: name, TunnelID: testTunnelA})
 	}
 	return app.reconcileIngressPhase(context.Background(), hosts, testAccounts(), pruned)
 }
@@ -832,12 +837,52 @@ func TestIngressPruneNeverRemovesCatchAll(t *testing.T) {
 	}
 }
 
-// TestIngressCannotPruneWhenNoTunnelIsDeclared documents a deliberate limit:
-// once the config declares no tunnel, the plugin cannot tell which tunnel an
-// orphaned route belongs to, and enumerating every tunnel in the account to
-// find out would mean rewriting tunnels the operator never declared to it. So
-// it reports instead of guessing.
-func TestIngressCannotPruneWhenNoTunnelIsDeclared(t *testing.T) {
+// TestIngressPrunesWhenNoTunnelIsDeclared is the case the registry exists to
+// fix: the config declares no tunnel host any more, but the deleted record
+// identifies a registered tunnel, so the orphaned route is cleaned up instead
+// of being reported for manual removal.
+func TestIngressPrunesWhenNoTunnelIsDeclared(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "a.example.com", Service: "http://a:80"},
+			{Hostname: "keep.example.com", Service: "http://keep:80"},
+			{Service: "https://caddy:443"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	// No tunnel hosts declared at all; the DNS pass deleted the record and the
+	// deleted CNAME named a registered tunnel.
+	if err := runIngressPruning(app, nil, "a.example.com"); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	if m.putCount() != 1 {
+		t.Fatalf("got %d writes, want 1", m.putCount())
+	}
+	rules := m.lastPut().Ingress
+	for _, r := range rules {
+		if r.Hostname == "a.example.com" {
+			t.Error("route whose DNS record was pruned must be deleted")
+		}
+	}
+	// Only the dead route goes: the foreign rule keeps its position and value,
+	// and the catch-all is not rewritten.
+	if len(rules) != 2 {
+		t.Fatalf("got %d rules, want keep + unchanged catch-all: %#v", len(rules), rules)
+	}
+	if rules[0].Hostname != "keep.example.com" || rules[0].Service != "http://keep:80" {
+		t.Errorf("foreign rule must survive untouched, got %#v", rules[0])
+	}
+	if rules[1].Hostname != "" || rules[1].Service != "https://caddy:443" {
+		t.Errorf("catch-all must stay as it was, got %#v", rules[1])
+	}
+}
+
+// TestIngressLeavesRouteOfUnregisteredTunnelAlone: the record names a tunnel,
+// but the registry does not contain it, so the plugin has no authorisation to
+// write to that tunnel and reports instead.
+func TestIngressLeavesRouteOfUnregisteredTunnelAlone(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
 		Ingress: []cfIngressRule{
 			{Hostname: "a.example.com", Service: "http://a:80"},
@@ -845,17 +890,18 @@ func TestIngressCannotPruneWhenNoTunnelIsDeclared(t *testing.T) {
 		},
 	})
 	app := newIngressTestApp(t, m, "https://caddy:443")
+	// Registered under a different name and id: the UUID in the deleted record
+	// is not in the registry at all.
+	app.Tunnels = []TunnelConfig{{Name: "other", ID: "99999999-8888-7777-6666-555555555555"}}
 
-	// No tunnel hosts declared at all; the DNS pass still pruned a name.
 	if err := runIngressPruning(app, nil, "a.example.com"); err != nil {
 		t.Fatalf("reconcile ingress: %v", err)
 	}
-
 	if m.putCount() != 0 {
-		t.Errorf("got %d writes, want 0: the owning tunnel is unknown", m.putCount())
+		t.Errorf("got %d writes, want 0: an unregistered tunnel must not be written", m.putCount())
 	}
 	if m.callCount(http.MethodGet) != 0 {
-		t.Errorf("got %d reads, want 0: no tunnel should be contacted", m.callCount(http.MethodGet))
+		t.Errorf("got %d reads, want 0: an unregistered tunnel must not even be read", m.callCount(http.MethodGet))
 	}
 }
 
@@ -934,7 +980,7 @@ func TestMergeIngressPlanReportsPruned(t *testing.T) {
 		{Service: "https://caddy:443"},
 	}
 
-	merged, changed, _, pruned := mergeIngressPlan(current, plan, map[string]bool{"gone.example.com": true})
+	merged, changed, _, pruned := mergeIngressPlan(current, plan, map[string]prunedName{"gone.example.com": {Host: "gone.example.com", TunnelID: testTunnelA}})
 
 	if !changed {
 		t.Error("expected a change to be reported")
@@ -961,7 +1007,7 @@ func TestMergeIngressPlanPrunedSetIsExact(t *testing.T) {
 		{Service: "https://caddy:443"},
 	}
 
-	merged, _, _, pruned := mergeIngressPlan(current, plan, map[string]bool{"never-declared.example.com": true})
+	merged, _, _, pruned := mergeIngressPlan(current, plan, map[string]prunedName{"never-declared.example.com": {Host: "never-declared.example.com", TunnelID: testTunnelA}})
 
 	if len(pruned) != 0 {
 		t.Errorf("pruned = %v, want none", pruned)
@@ -1363,13 +1409,14 @@ func TestAdaptAcceptsTunnelServiceWithTunnel(t *testing.T) {
 {
 	cf_dns_manager {
 		zone example.com api_token x
+		tunnel edge 8a7f3c2e-1234-4567-89ab-cdef01234567
 	}
 }
 
 example.com {
 	cf_dns_manager {
 		host example.com
-		tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
+		tunnel edge
 		tunnel_service https://caddy:443
 	}
 	respond "ok"
@@ -1405,13 +1452,14 @@ func TestAdaptRejectsBadTunnelService(t *testing.T) {
 {
 	cf_dns_manager {
 		zone example.com api_token x
+		tunnel edge 8a7f3c2e-1234-4567-89ab-cdef01234567
 	}
 }
 
 example.com {
 	cf_dns_manager {
 		host example.com
-		tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
+		tunnel edge
 		tunnel_service ftp://nope:21
 	}
 	respond "ok"

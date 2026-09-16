@@ -24,6 +24,43 @@ func (app *App) hostsSnapshot() []HostConfig {
 	return out
 }
 
+// tunnelIDByName returns the UUID registered under name. The lookup is
+// case-sensitive because a name is an identifier the operator writes verbatim
+// in both the registry and the host block.
+func (app *App) tunnelIDByName(name string) (string, bool) {
+	for _, tc := range app.Tunnels {
+		if tc.Name == name {
+			return tc.ID, true
+		}
+	}
+	return "", false
+}
+
+// tunnelRegistered reports whether id is registered under any name. Registration
+// is what authorises writing to a tunnel, and at the ingress phase the only
+// identifier in hand is the UUID parsed from a deleted record, so the lookup is
+// by id rather than by name.
+func (app *App) tunnelRegistered(id string) bool {
+	for _, tc := range app.Tunnels {
+		if tc.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// tunnelNames returns the registered names, sorted, for error messages and
+// logs. A caller that needs to tell "registered names exist but not this one"
+// from "nothing is registered" gets that distinction from the empty result.
+func (app *App) tunnelNames() []string {
+	names := make([]string, 0, len(app.Tunnels))
+	for _, tc := range app.Tunnels {
+		names = append(names, tc.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // assignZone determines the managed zone for a host from the declared zones
 // and fills in ZoneConfig on the HostConfig. Zone assignment uses the longest
 // matching declared zone suffix. A host that is not under any declared zone is

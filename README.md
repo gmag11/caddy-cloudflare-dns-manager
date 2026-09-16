@@ -179,36 +179,46 @@ Subdirectives:
 
 ### 3. Cloudflare Tunnel hosts
 
-A tunnel-backed host is declared with `tunnel <uuid>` instead of `ip`/`ip6`
-(the two are mutually exclusive). The plugin then reconciles a proxied CNAME to
-`<uuid>.cfargotunnel.com`, and — if the global block declares `account` — also
-writes that hostname's ingress rule on the tunnel:
+Tunnels are registered once in the global block, by name, and hosts reference
+that name:
 
 ```
 {
-	cf_dns_manager {
-		zone example.com api_token {$CF_EXAMPLE}
-		account {$CF_TUNNEL_TOKEN}
-		tunnel_default_service https://caddy:443
-	}
+        cf_dns_manager {
+                zone example.com api_token {$CF_EXAMPLE}
+                account {$CF_TUNNEL_TOKEN}
+                tunnel edge {$CF_TUNNEL_ID}
+                tunnel_default_service https://caddy:443
+        }
 }
 
 *.example.com {
-	tls {
-		dns cloudflare {$CF_EXAMPLE}
-	}
+        tls {
+                dns cloudflare {$CF_EXAMPLE}
+        }
 
-	@git host git.example.com
-	handle @git {
-		cf_dns_manager {
-			host @git
-			tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
-			# tunnel_service ssh://caddy:22   # optional per-host destination
-		}
-		reverse_proxy localhost:3000
-	}
+        @git host git.example.com
+        handle @git {
+                cf_dns_manager {
+                        host @git
+                        tunnel edge
+                        # tunnel_service ssh://caddy:22   # optional per-host destination
+                }
+                reverse_proxy localhost:3000
+        }
 }
 ```
+
+A tunnel-backed host is declared with `tunnel <name>` instead of `ip`/`ip6`
+(the two are mutually exclusive). The plugin resolves the name to the
+registered UUID at adapt time and reconciles a proxied CNAME to
+`<uuid>.cfargotunnel.com`; if the global block declares `account`, it also
+writes that hostname's ingress rule on the tunnel.
+
+Registering a tunnel does not by itself contact Cloudflare: the registry is a
+declaration of *which* tunnels this configuration may manage, and it is what
+authorises every ingress write. Declaring `tunnel lab` without registering
+`lab`, or writing a bare UUID, is a configuration error.
 
 The plugin writes one ingress rule per declared hostname plus a single catch-all
 carrying `tunnel_default_service`. Because that default is an ingress rule and
@@ -217,15 +227,15 @@ simply do not resolve.
 
 Route cleanup follows the DNS record: in a `prune`-enabled zone, deleting the
 record that made a hostname reachable also deletes that hostname's route in the
-same reload. A route whose record still exists is never touched, and removing
-the last tunnel host of a config leaves its route behind with a log line asking
-for manual cleanup.
+same reload. A route whose record still exists is never touched. This holds even
+when *no* host declares the tunnel any more: the deleted record names it
+(`<uuid>.cfargotunnel.com`), and the plugin prunes that tunnel's dead routes
+without listing the account's tunnels. Only routes whose records it just deleted
+are removed — every other rule, catch-all included, is left exactly as it was.
 
 | Subdirective | Description |
 | --- | --- |
-| `tunnel <uuid>` | Marks the host tunnel-backed. Mutually exclusive with `ip`, `ip6` and `proxied`. |
-| `tunnel_service <service>` | Optional ingress destination for this hostname, overriding `tunnel_default_service`. Requires `tunnel`. |
-
+| `tunnel <name>` | Marks the host tunnel-backed, referencing a tunnel registered in the global block. Mutually exclusive with `ip`, `ip6` and `proxied`. |
 Full walkthrough: [Configuring a Cloudflare Tunnel connection](docs/cloudflare-tunnel.md).
 Ingress management needs an extra, **account-scoped** token
 (`Account → Cloudflare Tunnel → Edit`); it is opt-in because that token can

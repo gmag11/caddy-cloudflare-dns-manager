@@ -32,8 +32,15 @@ func testApp(t *testing.T, m *mockCloudflare, publicIP string, ipHosts bool) (*A
 		IPURL:     detSrv.URL,
 		TagPrefix: "caddy-cf-dns",
 		Instance:  "test-host",
-		logger:    zap.NewNop(),
-		apiBase:   cfSrv.URL,
+		// The registry is what authorises an ingress write. Tests that drive
+		// HostConfig directly bypass adapt, so the tunnels they reference must
+		// be registered here for prune to be allowed to touch them.
+		Tunnels: []TunnelConfig{
+			{Name: "a", ID: testTunnelA},
+			{Name: "b", ID: testTunnelB},
+		},
+		logger:  zap.NewNop(),
+		apiBase: cfSrv.URL,
 	}
 	return app, detSrv
 }

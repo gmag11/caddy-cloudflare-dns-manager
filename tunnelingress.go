@@ -96,7 +96,7 @@ func deriveIngressPlan(hosts []HostConfig, defaultService string) map[string][]c
 // hostname the config also declares; since rules match top to bottom, the
 // effective destination then depends on ordering the plugin does not own, so
 // callers warn about it.
-func mergeIngressPlan(current, plan []cfIngressRule, prunedHosts map[string]bool) (merged []cfIngressRule, changed bool, shadowed []string, pruned []string) {
+func mergeIngressPlan(current, plan []cfIngressRule, prunedHosts map[string]prunedName) (merged []cfIngressRule, changed bool, shadowed []string, pruned []string) {
 	declared := make(map[string]bool, len(plan))
 	for _, r := range plan {
 		if r.Hostname != "" {
@@ -113,7 +113,7 @@ func mergeIngressPlan(current, plan []cfIngressRule, prunedHosts map[string]bool
 		if declared[host] {
 			continue // replaced by the derived rule
 		}
-		if prunedHosts[host] {
+		if _, ok := prunedHosts[host]; ok {
 			pruned = append(pruned, r.Hostname)
 			continue
 		}
@@ -266,38 +266,109 @@ func ingressRulesEqual(a, b []cfIngressRule) bool {
 }
 
 // reconcileTunnelIngress derives and writes the ingress plan for every tunnel
-// declared by the given hosts, and deletes routes whose DNS records this run
-// pruned. It is a separate phase from DNS reconciliation: a tunnel's hosts can
-// span zones, so grouping by zone would fragment a single tunnel's plan into
+// the given hosts declare, and deletes routes whose DNS records this run pruned.
+// It is a separate phase from DNS reconciliation: a tunnel's hosts can span
+// zones, so grouping by zone would fragment a single tunnel's plan into
 // competing writes.
 //
 // It runs even with no declared tunnel hosts when prunedHosts is non-empty, so
-// a tunnel that just lost its last declaration still gets cleaned up.
+// a tunnel that just lost its last host still gets cleaned up.
+//
+// Two independent conditions gate every write, and both are required:
+//
+//   - Registration (registered) authorises the tunnel. A tunnel absent from the
+//     registry is never contacted, whatever a deleted record says.
+//   - The pruned set attributes a hostname to a tunnel, and includes only names
+//     whose DNS record this run deleted, so every candidate route is provably
+//     dead rather than merely undeclared.
 //
 // Failures are returned rather than fatal, so a Tunnel API problem never
 // prevents DNS reconciliation (and vice versa). A partial failure leaves DNS
 // correct and is retried on the next config load.
-func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []HostConfig, defaultService string, prunedHosts map[string]bool, logger *zap.Logger) error {
+func reconcileTunnelIngress(
+	ctx context.Context,
+	cli *tunnelClient,
+	hosts []HostConfig,
+	defaultService string,
+	prunedHosts map[string]prunedName,
+	registered func(string) bool,
+	logger *zap.Logger,
+) error {
 	plans := deriveIngressPlan(hosts, defaultService)
 
-	// Tunnels that still need visiting: those with a derived plan, plus any
-	// tunnel referenced by a pruned host that no longer appears in the plan.
+	// The declared hostnames per tunnel, computed from the host declarations
+	// rather than from the plan, so the prune-only path can refuse to delete a
+	// declared host without relying on the plan it never received.
+	declaredByTunnel := make(map[string]map[string]bool)
+	for _, hc := range hosts {
+		if hc.TunnelID == "" {
+			continue
+		}
+		if declaredByTunnel[hc.TunnelID] == nil {
+			declaredByTunnel[hc.TunnelID] = make(map[string]bool)
+		}
+		declaredByTunnel[hc.TunnelID][strings.ToLower(hc.Host)] = true
+	}
+
+	// Tunnels to visit: those with a derived plan, plus those a deleted record
+	// points at. The plan is keyed by UUID, so a tunnel that is both is visited
+	// once, on the planned path — the pruned names are handled by the merge.
 	tunnelIDs := make([]string, 0, len(plans))
 	for id := range plans {
 		tunnelIDs = append(tunnelIDs, id)
 	}
+
+	// Attribution is per hostname, so collect what each tunnel is owed and
+	// report the names no tunnel can be attributed to.
+	prunedByTunnel := make(map[string]map[string]prunedName)
+	needsVisit := make(map[string]bool)
+	var unregistered, unattributed []string
+	for host, pn := range prunedHosts {
+		if pn.TunnelID == "" {
+			unattributed = append(unattributed, host)
+			continue
+		}
+		if !registered(pn.TunnelID) {
+			unregistered = append(unregistered, host)
+			continue
+		}
+		if prunedByTunnel[pn.TunnelID] == nil {
+			prunedByTunnel[pn.TunnelID] = make(map[string]prunedName)
+		}
+		prunedByTunnel[pn.TunnelID][host] = pn
+		needsVisit[pn.TunnelID] = true
+	}
+	// A tunnel with no plan must be visited; one that already has a plan is
+	// handled by the merge, which prunes the same names. Dedupe through the
+	// set: several pruned names can name the same tunnel, and visiting it once
+	// per name would issue competing writes and race with itself.
+	for id := range needsVisit {
+		if _, hasPlan := plans[id]; !hasPlan {
+			tunnelIDs = append(tunnelIDs, id)
+		}
+	}
 	sort.Strings(tunnelIDs)
+	sort.Strings(unregistered)
+	sort.Strings(unattributed)
+
+	// A name whose deleted record named no tunnel cannot be cleaned up: the
+	// plugin does not know which tunnel held its route, and it will not list
+	// the account's tunnels to find out.
+	if len(unattributed) > 0 {
+		logger.Info("DNS records were pruned but their deleted records name no tunnel, so their routes cannot be identified; if any exist, remove them manually in the dashboard",
+			zap.Int("pruned_names", len(unattributed)),
+			zap.Strings("hostnames", unattributed))
+	}
+	// A name whose record named an unregistered tunnel is deliberately left
+	// alone: the registry is what authorises a write, and it does not contain
+	// this tunnel.
+	if len(unregistered) > 0 {
+		logger.Warn("DNS records were pruned but the tunnels their records named are not registered, so their routes are left untouched; add the tunnel to the global block to manage it",
+			zap.Int("pruned_names", len(unregistered)),
+			zap.Strings("hostnames", unregistered))
+	}
 
 	if len(tunnelIDs) == 0 {
-		if len(prunedHosts) > 0 {
-			// No tunnel is referenced by the config anymore, so the plugin does
-			// not know which tunnel the orphaned route belongs to. Listing every
-			// tunnel in the account to find it would mean rewriting tunnels the
-			// operator never declared to this plugin, which is a far larger
-			// blast radius than the cleanup is worth. Report and stop.
-			logger.Info("DNS records were pruned but no tunnel is declared, so their routes cannot be identified; remove them manually in the dashboard",
-				zap.Int("pruned_names", len(prunedHosts)))
-		}
 		return nil
 	}
 
@@ -309,15 +380,17 @@ func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []Host
 
 	for _, tunnelID := range tunnelIDs {
 		plan := plans[tunnelID]
+		prunedNames := prunedByTunnel[tunnelID]
+		declared := declaredByTunnel[tunnelID]
 		wg.Add(1)
-		go func(tunnelID string, plan []cfIngressRule) {
+		go func(tunnelID string, plan []cfIngressRule, prunedNames map[string]prunedName, declared map[string]bool) {
 			defer wg.Done()
-			if err := reconcileOneTunnel(ctx, cli, tunnelID, plan, defaultService, prunedHosts, logger); err != nil {
+			if err := reconcileOneTunnel(ctx, cli, tunnelID, plan, defaultService, prunedNames, declared, logger); err != nil {
 				errMu.Lock()
 				errs = append(errs, err)
 				errMu.Unlock()
 			}
-		}(tunnelID, plan)
+		}(tunnelID, plan, prunedNames, declared)
 	}
 	wg.Wait()
 
@@ -327,10 +400,11 @@ func reconcileTunnelIngress(ctx context.Context, cli *tunnelClient, hosts []Host
 	return nil
 }
 
-// reconcileOneTunnel reads one tunnel's configuration, merges the derived plan,
-// drops routes whose DNS records this run pruned, and writes back only when
-// something changed.
-func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string, plan []cfIngressRule, defaultService string, prunedHosts map[string]bool, logger *zap.Logger) error {
+// reconcileOneTunnel reads one tunnel's configuration, applies the derived plan
+// when there is one, drops routes whose DNS records this run pruned, and writes
+// back only when something changed. A tunnel reached only through a deleted
+// record has no plan and takes the prune-only path, which must not invent one.
+func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string, plan []cfIngressRule, defaultService string, prunedNames map[string]prunedName, declaredHosts map[string]bool, logger *zap.Logger) error {
 	log := logger.With(zap.String("tunnel_id", tunnelID))
 
 	current, err := cli.getConfiguration(ctx, tunnelID)
@@ -344,12 +418,23 @@ func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string,
 	if current.Source == "local" {
 		log.Error("refusing to manage tunnel ingress: it is locally managed",
 			zap.String("source", "local"),
-			zap.String("remedy", "recreate the tunnel as remotely-managed, or stop declaring its hosts with `tunnel <uuid>`"))
+			zap.String("remedy", "recreate the tunnel as remotely-managed, or stop declaring its hosts with `tunnel <name>`"))
 		return fmt.Errorf("tunnel %s: ingress is locally managed (source: local); "+
 			"recreate the tunnel as remotely-managed, or remove its hosts from the plugin", tunnelID)
 	}
 
-	merged, changed, shadowed, pruned := mergeIngressPlan(current.Config.Ingress, plan, prunedHosts)
+	var (
+		merged    []cfIngressRule
+		changed   bool
+		shadowed  []string
+		pruned    []string
+		pruneOnly = len(plan) == 0
+	)
+	if pruneOnly {
+		merged, changed, pruned = pruneOnlyIngress(current.Config.Ingress, prunedNames, declaredHosts)
+	} else {
+		merged, changed, shadowed, pruned = mergeIngressPlan(current.Config.Ingress, plan, prunedNames)
+	}
 	for _, s := range shadowed {
 		log.Warn("preserved wildcard ingress rule shadows a declared host; the effective destination depends on rule order",
 			zap.String("shadowing", s))
@@ -370,6 +455,13 @@ func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string,
 		return fmt.Errorf("tunnel %s: writing configuration: %v", tunnelID, err)
 	}
 
+	if pruneOnly {
+		log.Info("pruned routes from a tunnel this configuration no longer assigns hosts to",
+			zap.Int("rules", len(merged)),
+			zap.Int("pruned_routes", len(pruned)))
+		return nil
+	}
+
 	origin := "configured default"
 	if defaultService == "" {
 		origin = "fail-closed default"
@@ -380,4 +472,52 @@ func reconcileOneTunnel(ctx context.Context, cli *tunnelClient, tunnelID string,
 		zap.Int("pruned_routes", len(pruned)),
 		zap.String("catch_all_origin", origin))
 	return nil
+}
+
+// pruneOnlyIngress removes the routes whose hostnames this run pruned and
+// changes nothing else. It exists because mergeIngressPlan cannot express this:
+// that function drops every rule without a hostname and re-emits the catch-all
+// from the derived plan, so an empty plan would produce a configuration with no
+// catch-all at all — invalid, and a rewrite of a default route the plugin was
+// never asked to manage.
+//
+// Every other rule is returned exactly as read, in place, including its
+// service, its path and its origin request. In particular matchSNItoHost is
+// neither added nor repaired here: that is the plugin authoring a rule, which
+// is not what a prune-only write is.
+//
+// A rule whose hostname is in declaredHosts is skipped, mirroring the guarantee
+// on the planned path. This cannot happen today — a tunnel with declared hosts
+// has a plan, so it never reaches here — but the two paths must agree on what
+// they refuse to delete if that ever changes.
+func pruneOnlyIngress(current []cfIngressRule, prunedNames map[string]prunedName, declaredHosts map[string]bool) (merged []cfIngressRule, changed bool, pruned []string) {
+	if len(prunedNames) == 0 {
+		return current, false, nil
+	}
+
+	merged = make([]cfIngressRule, 0, len(current))
+	for _, r := range current {
+		// The catch-all has no hostname and is structurally ineligible: it can
+		// never appear in a set of hostnames.
+		if r.Hostname == "" {
+			merged = append(merged, r)
+			continue
+		}
+		host := strings.ToLower(r.Hostname)
+		if declaredHosts[host] {
+			merged = append(merged, r)
+			continue
+		}
+		if _, ok := prunedNames[host]; !ok {
+			merged = append(merged, r)
+			continue
+		}
+		pruned = append(pruned, r.Hostname)
+	}
+	sort.Strings(pruned)
+
+	if len(pruned) == 0 {
+		return current, false, nil
+	}
+	return merged, true, pruned
 }

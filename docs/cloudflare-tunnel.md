@@ -118,9 +118,9 @@ tunnel/*.json
 
 ## Step 2 — Point the plugin at the tunnel
 
-Add the `tunnel` subdirective to the host's `cf_dns_manager` block. It takes the
-tunnel UUID. To let the plugin write the ingress rules too, add the
-account-scoped `account` line and a default service to the global block:
+Register the tunnel in the global block under a name, then reference that name
+from the host's `tunnel` subdirective. To let the plugin write the ingress rules
+too, add the account-scoped `account` line and a default service:
 
 ```
 {
@@ -192,10 +192,14 @@ halves automatically.
 
 ### Rules for the `tunnel` subdirective
 
-- `tunnel <uuid>` is **mutually exclusive** with `ip`, `ip6` and `proxied`. A
+- `tunnel <name>` references a tunnel registered in the global block. The
+  adapter resolves it to the UUID, so an unregistered name is a configuration
+  error rather than a silent no-op. The UUID itself belongs in the global block,
+  not in the host block.
+- `tunnel <name>` is **mutually exclusive** with `ip`, `ip6` and `proxied`. A
   tunnel host has no address plan and its CNAME is always proxied, so combining
   them is a configuration error at adapt time.
-- The UUID must be a canonical `8-4-4-4-12` hexadecimal UUID.
+- The registered UUID must be a canonical `8-4-4-4-12` hexadecimal UUID.
 - `force_adopt` is allowed and is how you adopt a CNAME that was created outside
   the plugin (for example by `cloudflared tunnel route dns`), which has no
   ownership tag.
@@ -221,6 +225,21 @@ halves automatically.
 - The default is written as the tunnel's **final catch-all rule**. Because it
   has no hostname, it creates no DNS record — that is what keeps undeclared
   subdomains unresolvable.
+
+### Known limits
+
+Two cases are deliberately not handled, and neither is a silent failure:
+
+- **Moving a hostname from one tunnel to another** leaves the old tunnel's route
+  behind. The plugin updates the CNAME in place rather than deleting it, and
+  route cleanup is driven by a DNS deletion, so nothing signals that the old
+  route became dead. Re-pointing the host and reconciling corrects the DNS half
+  only; remove the old route by hand, or delete the host first (`prune` enabled,
+  so its route goes) and then re-declare it against the new tunnel.
+- **The catch-all is per tunnel, but its service is global.** Every registered
+  tunnel's catch-all is written from `tunnel_default_service`, so two tunnels
+  with different origins need a per-host `tunnel_service` on each host rather
+  than one shared default.
 
 ## Step 3 — Verify
 
@@ -258,7 +277,7 @@ you will see a log line explaining that the record is not owned; add
 You can move a hostname between tunnel-backed and address-backed just by editing
 the directive; no manual DNS cleanup is needed.
 
-**Address → tunnel:** remove `ip`/`ip6`/`proxied` and add `tunnel <uuid>`. On the
+**Address → tunnel:** remove `ip`/`ip6`/`proxied` and add `tunnel <name>`. On the
 next reload the plugin deletes the owned A/AAAA record and creates the CNAME.
 
 **Tunnel → address:** remove `tunnel` and add `ip` (or `ip6 auto`). On the next
@@ -301,10 +320,17 @@ Two cases leave the route in place, both inert:
   is preserved. In particular, switching a host from `tunnel` to `ip` always
   deletes the CNAME — Cloudflare forbids it coexisting with an address record —
   but the route is only cleaned up when the zone opted into `prune`.
-- **This was the last tunnel host of the config.** With no tunnel declared the
-  plugin cannot tell which one holds the route, and it will not scan the
-  account's tunnels. It logs that manual removal is needed; the route is inert
-  because the hostname no longer resolves.
+- **The deleted record names no tunnel, or names one that is not registered.**
+  An A record names no tunnel at all; a CNAME to somewhere other than
+  `cfargotunnel.com` does not either. A CNAME naming an unregistered tunnel is
+  deliberately left alone, because registration is what authorises a write. The
+  plugin logs which case applies instead of guessing.
+
+Removing the *last* tunnel host is therefore no longer a limit: the deleted
+CNAME names the tunnel, and it is pruned like any other dead route. That path
+removes only the routes whose records it just deleted — the catch-all and every
+other rule of that tunnel are left byte-for-byte as they were, since the plugin
+has no plan to reconcile for a tunnel no host declares.
 
 The tunnel itself is not touched by the plugin; remove it separately with
 `cloudflared tunnel delete <name>` or from the dashboard.
@@ -315,7 +341,7 @@ The tunnel itself is not touched by the plugin; remove it separately with
 
 | Subdirective | Value | Notes |
 | --- | --- | --- |
-| `tunnel` | `<uuid>` | Marks the host tunnel-backed. Reconciles a proxied CNAME to `<uuid>.cfargotunnel.com`. |
+| `tunnel` | `<name>` | Marks the host tunnel-backed, referencing a registered tunnel. Reconciles a proxied CNAME to `<uuid>.cfargotunnel.com`. |
 | `tunnel_service` | `<service>` | Optional. This hostname's ingress destination, overriding `tunnel_default_service`. Requires `tunnel`. |
 | `force_adopt` | — | Adopt an existing untagged CNAME (or an untagged A/AAAA blocking a switch). |
 
@@ -323,7 +349,8 @@ Global options that affect tunnels:
 
 | Option | Value | Notes |
 | --- | --- | --- |
-| `account` | `<id> api_token <token>` | Account-scoped credential for the Tunnel API. Optional; without it the plugin never calls it. |
+| `account` | `<token>` | Account-scoped credential for the Tunnel API. Optional; without it the plugin never calls it. |
+| `tunnel` | `<name> <uuid>` | Registers a tunnel this config may manage. Repeatable. Registration authorises every ingress write. |
 | `tunnel_default_service` | `<service>` | The tunnel's catch-all destination. Defaults to `http_status:404`. |
 
 Notes:
@@ -343,10 +370,11 @@ Notes:
   receive traffic, so nothing is inferred. This covers both removing a host and
   switching one from `tunnel` to `ip`. A route whose record still exists is
   never touched, and a declared host's route is never removed.
-- **Removing the last tunnel host leaves its route behind.** With no tunnel
-  declared, the plugin cannot tell which tunnel holds the route, and it will not
-  scan the account's tunnels to find out. It logs the orphan instead; delete it
-  by hand in the dashboard. Removing one host among several is fully automatic.
+- **A route is removed only when its own record was deleted.** The plugin does
+  not scan the account's tunnels, and it never deletes a rule on the strength of
+  anything but a DNS deletion from the same run. Removing any tunnel host —
+  including the last one — cleans up its route automatically in a `prune`-enabled
+  zone.
 
 ### The tunnel ingress configuration (`cloudflared` side)
 

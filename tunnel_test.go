@@ -16,13 +16,14 @@ func TestAdaptTunnelValid(t *testing.T) {
 {
 	cf_dns_manager {
 		zone example.com api_token x
+		tunnel edge ` + testTunnelUUID + `
 	}
 }
 
 example.com {
 	cf_dns_manager {
 		host example.com
-		tunnel ` + testTunnelUUID + `
+		tunnel edge
 		force_adopt
 	}
 	respond "x"
@@ -32,7 +33,30 @@ example.com {
 	assertAppPresent(t, cfg)
 }
 
-func TestAdaptTunnelMalformedUUIDFails(t *testing.T) {
+func TestAdaptTunnelUnknownNameFails(t *testing.T) {
+	input := `
+{
+	cf_dns_manager {
+		zone example.com api_token x
+		tunnel edge ` + testTunnelUUID + `
+	}
+}
+
+example.com {
+	cf_dns_manager {
+		host example.com
+		tunnel lab
+	}
+	respond "x"
+}
+`
+	requireAdaptErr(t, input, "registered tunnels: edge")
+}
+
+// TestAdaptTunnelUUIDIsNotAnImplicitRegistration pins the migration path: the
+// pre-registry spelling must be rejected with an error that says where the UUID
+// now belongs, not treated as a valid declaration.
+func TestAdaptTunnelUUIDIsNotAnImplicitRegistration(t *testing.T) {
 	input := `
 {
 	cf_dns_manager {
@@ -43,12 +67,12 @@ func TestAdaptTunnelMalformedUUIDFails(t *testing.T) {
 example.com {
 	cf_dns_manager {
 		host example.com
-		tunnel not-a-uuid
+		tunnel ` + testTunnelUUID + `
 	}
 	respond "x"
 }
 `
-	requireAdaptErr(t, input, "tunnel must be a UUID")
+	requireAdaptErr(t, input, "add `tunnel <name> "+testTunnelUUID+"` to the global block")
 }
 
 func TestAdaptTunnelMissingArgFails(t *testing.T) {
@@ -56,6 +80,7 @@ func TestAdaptTunnelMissingArgFails(t *testing.T) {
 {
 	cf_dns_manager {
 		zone example.com api_token x
+		tunnel edge ` + testTunnelUUID + `
 	}
 }
 
@@ -90,13 +115,14 @@ func tunnelAdaptInput(extra string) string {
 {
 	cf_dns_manager {
 		zone example.com api_token x
+		tunnel edge ` + testTunnelUUID + `
 	}
 }
 
 example.com {
 	cf_dns_manager {
 		host example.com
-		tunnel ` + testTunnelUUID + `
+		tunnel edge
 		` + extra + `
 	}
 	respond "x"

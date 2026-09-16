@@ -114,7 +114,7 @@ The CNAME exists but the tunnel has no ingress rule matching that hostname.
 
 - **With the `account` block (plugin-managed ingress):** the plugin should have
   written the rule. Check the log for `wrote tunnel ingress plan`; if it is
-  missing, the host is probably not declared with `tunnel <uuid>` in its
+  missing, the host is probably not declared with `tunnel <name>` in its
   `cf_dns_manager` block. A 404 can also mean an earlier catch-all rule (a
   preserved foreign wildcard) is matching first — look for the
   `preserved wildcard ingress rule shadows a declared host` warning.
@@ -166,14 +166,55 @@ also deletes that hostname's DNS record in the same run, and only in a
   route is only cleaned up under `prune`. It is now unreachable (the name
   resolves to your address, not through the tunnel) and no later run will touch
   it, so delete it by hand if it bothers you.
-- **This was the last tunnel host of the config.** With no tunnel declared the
-  plugin cannot tell which tunnel holds the route, and it will not scan the
-  account's tunnels to find out; the log says so explicitly. Delete it by hand
-  in the dashboard.
+- **The deleted record names no tunnel.** An A record never implies a tunnel
+  route; neither does a CNAME pointing somewhere other than
+  `cfargotunnel.com`. The plugin logs that it cannot attribute the route and
+  says so rather than guessing.
+- **The deleted record names a tunnel that is not registered.** Registration in
+  the global block is what authorises an ingress write, so a tunnel absent from
+  it is left untouched even when the record clearly points at it. The log names
+  the hostnames; add the tunnel to the global block and reload.
+
+Removing the last tunnel host is **not** on this list: the deleted CNAME names
+the tunnel, so its route is pruned like any other dead route.
+
+### `tunnel "..." looks like a UUID and no registration uses it`
+
+Every configuration written before the tunnel registry was introduced carries a
+raw UUID in the host block, so this is the migration error. Tunnels are now
+registered once, by name, in the global block:
+
+```
+{
+        cf_dns_manager {
+                zone example.com api_token {$CF_DNS_TOKEN}
+                tunnel edge 8a7f3c2e-1234-4567-89ab-cdef01234567
+        }
+}
+
+app.example.com {
+        cf_dns_manager {
+                host app.example.com
+                tunnel edge      # was: tunnel 8a7f3c2e-1234-4567-89ab-cdef01234567
+        }
+}
+```
+
+Take the UUID from the host block you already had, register it under any name,
+and reference the name. A UUID-shaped value is deliberately rejected rather than
+treated as an implicit registration: implicit registration would restore the hole
+the registry closes, where a valid-looking typo silently wrote to a tunnel that
+does not exist.
+
+### `tunnel "..." is not registered; registered tunnels: ...`
+
+The host references a name the global block does not register. The error lists
+the names that are registered, so the usual cause is a typo or a name registered
+in a different Caddyfile.
 
 ### A route was pruned and I want it back
 
-Re-declare the host with `tunnel <uuid>`. Both halves are recreated from the
+Re-declare the host with `tunnel <name>`. Both halves are recreated from the
 same declaration: the DNS record and the route. Prune is not reversible on its
 own, which is why it only ever removes routes whose record it deleted moments
 earlier.

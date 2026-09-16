@@ -20,11 +20,17 @@
 		# the zone below (a tunnel always lives in its zone's account).
 		account {$CF_ACCOUNT_TUNNEL_TOKEN}
 
-		# Default destination for tunnel traffic that no declared host claims.
-		# It becomes the tunnel's final catch-all rule, which is why no
-		# wildcard DNS record is needed for the zone. Unset, the plugin writes
-		# http_status:404 (fail closed) instead of guessing an origin.
+		# Destination for tunnel traffic that no declared host claims. It becomes
+		# the tunnel's final catch-all rule, which is why no wildcard DNS record
+		# is needed for the zone. Unset, the plugin writes http_status:404
+		# (fail closed) instead of guessing an origin.
 		tunnel_default_service https://caddy:443
+
+		# Tunnel registry: the tunnels this configuration may manage, each under
+		# the name the host blocks reference. Registration is what authorises an
+		# ingress write, so a tunnel that is not listed here is never contacted,
+		# whatever a deleted DNS record says.
+		tunnel edge {$CF_TUNNEL_ID}
 
 		# Optional: override the public IPv4 detection endpoint.
 		# ip_url https://ifconfig.me/ip
@@ -50,7 +56,7 @@
 			#ip 100.64.10.5      # explicit override (e.g. Tailscale)
 			#ip6 auto
 			#proxied yes
-			#tunnel {$CF_TUNNEL_ID}
+			tunnel edge         # names a tunnel from the global registry
 			force_adopt
 		}
 		respond "test1.{$CF_ZONE} OK" 200
@@ -67,7 +73,7 @@
 	handle @git {
 		cf_dns_manager {
 			host @git
-			tunnel {$CF_TUNNEL_ID}
+			tunnel edge
 			# Optional per-host destination, overriding the global default.
 			# tunnel_service ssh://caddy:22
 			force_adopt

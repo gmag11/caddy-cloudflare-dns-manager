@@ -3,7 +3,9 @@
 ## Purpose
 
 Defines how the plugin manages Cloudflare Tunnel ingress for tunnel-backed hosts: the optional account-scoped credential and derivation of the account id from the managed zone, the ingress plan derivation (per-host rules, deterministic ordering, configurable default route, mandatory catch-all), read-modify-write reconciliation against the Tunnel configuration API, preservation of foreign rules, the no-deletion rule for undeclared rules, remotely-managed-only enforcement, and idempotent writes.
+
 ## Requirements
+
 ### Requirement: Account-scoped tunnel credential
 
 The global `cf_dns_manager` block SHALL accept an optional `account <token>` subdirective supplying an account-scoped credential for the Cloudflare Tunnel API. The account id SHALL be derived from the managed zone's owning account rather than configured, because Cloudflare guarantees a tunnel and its zone share an account. An optional `account_id <account-id>` subdirective SHALL override that derivation. When no `account` subdirective is present, the plugin SHALL NOT call the Tunnel API and SHALL behave exactly as before this capability existed.
@@ -106,7 +108,7 @@ For each tunnel UUID declared by at least one host, the plugin SHALL derive exac
 
 #### Scenario: One rule per declared host
 
-- **WHEN** two hosts each declare `tunnel <uuid>` and no `tunnel_service`
+- **WHEN** two hosts each declare `tunnel <name>` for the same registered tunnel and no `tunnel_service`
 - **THEN** the plan for that tunnel contains one rule for each hostname, each serving the default service
 
 #### Scenario: Deterministic rule order
@@ -116,8 +118,8 @@ For each tunnel UUID declared by at least one host, the plugin SHALL derive exac
 
 #### Scenario: Multiple tunnels are independent
 
-- **WHEN** host A declares `tunnel <uuid-1>` and host B declares `tunnel <uuid-2>`
-- **THEN** the plan for `uuid-1` contains only A's rule and the plan for `uuid-2` contains only B's rule
+- **WHEN** host A declares `tunnel <name-1>` and host B declares `tunnel <name-2>`, two distinct registered tunnels
+- **THEN** the plan for the first tunnel contains only A's rule and the plan for the second contains only B's rule
 
 ### Requirement: Per-host service override
 
@@ -130,7 +132,7 @@ The per-site `cf_dns_manager` host block SHALL accept an optional `tunnel_servic
 
 #### Scenario: Override without tunnel
 
-- **WHEN** a host block declares `tunnel_service https://caddy:443` but no `tunnel <uuid>`
+- **WHEN** a host block declares `tunnel_service https://caddy:443` but no `tunnel`
 - **THEN** the adapter rejects the config with an error explaining that `tunnel_service` requires `tunnel`
 
 #### Scenario: Host rule precedes the default rule
@@ -140,13 +142,8 @@ The per-site `cf_dns_manager` host block SHALL accept an optional `tunnel_servic
 
 #### Scenario: Invalid service value
 
-- **WHEN** a host block declares `tunnel <uuid>` and a `tunnel_service` outside the accepted tunnel service values
+- **WHEN** a host block declares `tunnel <name>` and a `tunnel_service` outside the accepted tunnel service values
 - **THEN** the adapter rejects the config with an error naming the invalid value, by the same rule that governs the global default
-
-#### Scenario: Socket destination for one host
-
-- **WHEN** a tunnel host declares `tunnel_service unix:///run/app.sock`
-- **THEN** the value is accepted and that hostname's rule serves it
 
 ### Requirement: Foreign ingress rules are preserved
 
@@ -216,11 +213,11 @@ The plugin SHALL manage ingress only for tunnels whose configuration source is r
 
 ### Requirement: Undeclared ingress rules are not deleted
 
-Rules removed from the configuration SHALL NOT be deleted from the tunnel, except when the owning zone has declared `prune` AND the route's hostname is one whose DNS record this plugin deleted during the same reconcile, as specified by the `tunnel-ingress-prune` capability. When any of those conditions fails, the rule SHALL be preserved. The plugin SHALL NOT delete a rule on the basis of its `description` or of any inferred property.
+Rules removed from the configuration SHALL NOT be deleted from the tunnel, except when the owning zone has declared `prune` AND the route's hostname is one whose DNS record this plugin deleted during the same reconcile, as specified by the `tunnel-ingress-prune` capability. When any of those conditions fails, the rule SHALL be preserved. The plugin SHALL NOT delete a rule on the basis of its `description` or of any inferred property. The tunnel holding the rule need not be one a host still declares: a route on a registered tunnel that no host currently declares is eligible when its hostname's DNS record was deleted in this run.
 
 #### Scenario: Removed host rule left in place without the opt-in
 
-- **WHEN** a host that previously declared `tunnel <uuid>` is removed from the config and the owning zone has not declared `prune`
+- **WHEN** a host that previously declared `tunnel <name>` is removed from the config and the owning zone has not declared `prune`
 - **THEN** its ingress rule remains on the tunnel and the plugin logs that manual removal is required
 
 #### Scenario: Route whose DNS record survived is preserved
@@ -232,6 +229,11 @@ Rules removed from the configuration SHALL NOT be deleted from the tunnel, excep
 
 - **WHEN** the owning zone declared `prune`, the route's hostname is undeclared, and this run's DNS prune deleted the record for that hostname
 - **THEN** the route is removed from the configuration in the same write as the derived plan
+
+#### Scenario: Eligible route on a registered tunnel no host declares
+
+- **WHEN** the owning zone declared `prune`, the tunnel is registered, no host declares it any more, and this run deleted the CNAME that made a route's hostname reachable
+- **THEN** the route is removed from that tunnel, identified from the deleted record, without rewriting any other rule of it
 
 #### Scenario: Description is never a deletion signal
 

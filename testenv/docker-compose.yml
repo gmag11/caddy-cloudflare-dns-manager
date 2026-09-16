@@ -33,7 +33,8 @@ services:
   #
   # The tunnel is remotely-managed, so its ingress rules live on Cloudflare and
   # are written by the plugin itself (the `account` block in the Caddyfile plus
-  # the `tunnel <uuid>` declarations). There is no config.yml: a remotely-managed
+  # the `tunnel <name>` declarations plus the global tunnel registry). There is
+  # no config.yml: a remotely-managed
   # connector ignores `--config` and takes its identity from the token.
   #
   # One-time setup: create the tunnel in the dashboard (Networking > Tunnels >

@@ -9,7 +9,7 @@ them and shows the common dual-family setups.
 | --- | --- | --- | --- |
 | Detected public IPv4 | *(default)* | CF edge → your IP (proxied) | ports open, IP hidden by proxy |
 | Explicit IPv4 | `ip <a.b.c.d>` | same | same |
-| Cloudflare Tunnel | `tunnel <uuid>` | CF edge → cloudflared (outbound) | **no open ports, no public IP** |
+| Cloudflare Tunnel | `tunnel <name>` | CF edge → cloudflared (outbound) | **no open ports, no public IP** |
 | Tailscale (direct) | `ip 100.x.y.z` / `ip6 <ULA>` | **bypasses Cloudflare** — DNS-only, LAN/VPN only | none |
 
 Key distinction: `proxied yes/no` decides whether visitors go *through

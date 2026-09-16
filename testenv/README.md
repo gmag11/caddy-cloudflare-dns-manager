@@ -26,7 +26,7 @@ zone ... api_token ...   →   DNS records (A/AAAA/CNAME), tagged with instance
                              └─ the lookup also yields the account id
 account ...              →   tunnel ingress plan (rules + catch-all)
 tunnel_default_service   →     └─ the catch-all, NOT a wildcard DNS record
-tunnel <uuid> (per host) →     └─ one rule per declared hostname
+tunnel <name> (per host) →     └─ one rule per declared hostname
 ```
 
 Because the default route is the tunnel's mandatory catch-all, the zone needs

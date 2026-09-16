@@ -79,6 +79,14 @@ type App struct {
 	// Empty means the fail-closed default (http_status:404).
 	TunnelDefaultService string `json:"tunnel_default_service,omitempty"`
 
+	// Tunnels is the tunnel registry: the Cloudflare Tunnels this
+	// configuration may manage, each under an operator-chosen name. A host
+	// block references an entry by name and the adapter resolves it to the
+	// UUID. Registration is what authorises writing to a tunnel, so a tunnel
+	// absent from this list is never contacted, even when a DNS record this
+	// run deleted names it.
+	Tunnels []TunnelConfig `json:"tunnels,omitempty"`
+
 	// logger is the app logger.
 	logger *zap.Logger `json:"-"`
 
@@ -105,6 +113,10 @@ type HostConfig struct {
 	Proxied *bool `json:"proxied,omitempty"`
 	// ForceAdopt allows adopting/updating an untagged existing record.
 	ForceAdopt bool `json:"force_adopt,omitempty"`
+	// TunnelName is the registry name the host block referenced, kept for
+	// logging and for the adapt-time error path. It is resolved to TunnelID
+	// during adapt; only TunnelID is used at reconcile time.
+	TunnelName string `json:"-"`
 	// TunnelID, when non-empty, declares this host as Cloudflare Tunnel-backed:
 	// the plugin reconciles a single proxied CNAME to
 	// <TunnelID>.cfargotunnel.com instead of A/AAAA records. Mutually
@@ -126,6 +138,17 @@ type ZoneConfig struct {
 	APIToken string `json:"api_token"`
 	// Prune enables deleting this instance's orphaned A records in this zone.
 	Prune bool `json:"prune,omitempty"`
+}
+
+// TunnelConfig declares a Cloudflare Tunnel this configuration may manage,
+// under an operator-chosen name. The name is what host blocks reference
+// (`tunnel <name>`); the UUID is what Cloudflare's API requires, and is what
+// the CNAME target and the ingress plan are built from.
+type TunnelConfig struct {
+	// Name is the registry key a host block references.
+	Name string `json:"name"`
+	// ID is the tunnel's canonical UUID (lower case).
+	ID string `json:"id"`
 }
 
 // CaddyModule returns the Caddy module information.

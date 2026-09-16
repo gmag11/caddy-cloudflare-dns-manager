@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -20,6 +21,7 @@ import (
 //	    zone <zone> api_token <token> [prune]
 //	    account <token>            # token-only; the account id is derived
 //	    account_id <account-id>    # optional override of that derivation
+//	    tunnel <name> <uuid>       # repeatable; the tunnels this config may manage
 //	    tunnel_default_service <service>
 //	    ip_url <url>
 //	    ip6_url <url>
@@ -64,6 +66,12 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 			if d.NextArg() {
 				return nil, d.ArgErr()
 			}
+		case "tunnel":
+			tc, err := parseTunnelEntry(d, app.Tunnels)
+			if err != nil {
+				return nil, err
+			}
+			app.Tunnels = append(app.Tunnels, tc)
 		case "tunnel_default_service":
 			if !d.NextArg() {
 				return nil, d.Errf("tunnel_default_service requires a service value")
@@ -118,6 +126,50 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 	}, nil
 }
 
+// parseTunnelEntry parses one `tunnel <name> <uuid>` registration line. The
+// name is the key host blocks reference; the UUID is validated here rather
+// than at the host, because the registry is now the only place a tunnel
+// identifier is written by hand. Duplicates are rejected against the entries
+// parsed so far.
+func parseTunnelEntry(d *caddyfile.Dispenser, registered []TunnelConfig) (TunnelConfig, error) {
+	var tc TunnelConfig
+	if !d.NextArg() {
+		return tc, d.Errf("tunnel requires a name and a UUID")
+	}
+	name := d.Val()
+	if !d.NextArg() {
+		return tc, d.Errf("tunnel requires a UUID after the name %q", name)
+	}
+	id := strings.ToLower(d.Val())
+	if d.NextArg() {
+		return tc, d.ArgErr()
+	}
+	if err := validateTunnelName(name); err != nil {
+		return tc, d.Errf("%v", err)
+	}
+	if !isUUID(id) {
+		return tc, d.Errf("tunnel %q: %q is not a UUID", name, d.Val())
+	}
+	for _, existing := range registered {
+		if existing.Name == name {
+			return tc, d.Errf("tunnel %q is registered more than once", name)
+		}
+	}
+	return TunnelConfig{Name: name, ID: id}, nil
+}
+
+// validateTunnelName rejects names that cannot be used as a Caddyfile token
+// or would be ambiguous in an error message.
+func validateTunnelName(name string) error {
+	if name == "" {
+		return fmt.Errorf("tunnel name cannot be empty")
+	}
+	if strings.ContainsAny(name, " \t\r\n") {
+		return fmt.Errorf("tunnel name %q cannot contain whitespace", name)
+	}
+	return nil
+}
+
 // parseZone parses: zone <zone> api_token <token> [prune]
 func parseZone(d *caddyfile.Dispenser) (ZoneConfig, error) {
 	var zc ZoneConfig
@@ -166,9 +218,13 @@ func parseZone(d *caddyfile.Dispenser) (ZoneConfig, error) {
 func parseDirective(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error) {
 	h.Next() // consume directive name
 
-	// The declared zones come from the global options block (parsed before
-	// per-site directives run).
+	// The declared zones and tunnel registry come from the global options
+	// block (parsed before per-site directives run).
 	zones, err := zonesFromOptions(h)
+	if err != nil {
+		return nil, err
+	}
+	tunnels, err := tunnelsFromOptions(h)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +237,17 @@ func parseDirective(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 	// Resolve the host to a zone now so undeclared zones fail at adapt time.
 	if err := assignZone(zones, &hc); err != nil {
 		return nil, err
+	}
+
+	// Resolve the tunnel name to its registered UUID now, for the same reason:
+	// a host pointing at a tunnel this config does not manage is a
+	// configuration error, not a runtime surprise.
+	if hc.TunnelName != "" {
+		id, ok := tunnelIDIn(tunnels, hc.TunnelName)
+		if !ok {
+			return nil, unresolvedTunnelError(h, hc.TunnelName, tunnels)
+		}
+		hc.TunnelID = id
 	}
 
 	handler := hostHandler{Host: hc}
@@ -291,17 +358,13 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 			}
 			hc.ForceAdopt = true
 		case "tunnel":
-			if hc.TunnelID != "" {
+			if hc.TunnelName != "" {
 				return hc, h.Errf("tunnel specified more than once")
 			}
 			if !h.NextArg() {
 				return hc, h.ArgErr()
 			}
-			id := strings.ToLower(h.Val())
-			if !isUUID(id) {
-				return hc, h.Errf("tunnel must be a UUID, got %q", h.Val())
-			}
-			hc.TunnelID = id
+			hc.TunnelName = h.Val()
 			if h.NextArg() {
 				return hc, h.ArgErr()
 			}
@@ -328,7 +391,7 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 		return hc, h.Errf("cf_dns_manager requires a host subdirective")
 	}
 
-	if hc.TunnelID != "" {
+	if hc.TunnelName != "" {
 		// A tunnel host has no IP plan and its CNAME must always be proxied.
 		if hc.IP != "" {
 			return hc, h.Errf("tunnel cannot be combined with ip; a tunnel host routes via CNAME, not an address")
@@ -342,7 +405,7 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 	} else if hc.TunnelService != "" {
 		// tunnel_service describes a tunnel ingress rule; without a tunnel
 		// there is no rule to describe, so this is almost certainly a typo
-		// (e.g. a forgotten `tunnel <uuid>`).
+		// (e.g. a forgotten `tunnel <name>`).
 		return hc, h.Errf("tunnel_service requires a tunnel subdirective in the same block; a service route only exists for a tunnel host")
 	}
 
@@ -501,6 +564,56 @@ func zonesFromOptions(h httpcaddyfile.Helper) ([]ZoneConfig, error) {
 		return nil, h.Errf("internal error decoding cf_dns_manager global option: %v", err)
 	}
 	return app.Zones, nil
+}
+
+// tunnelsFromOptions reads the tunnel registry out of the global options value,
+// by the same decode-the-app-JSON route as zonesFromOptions.
+func tunnelsFromOptions(h httpcaddyfile.Helper) ([]TunnelConfig, error) {
+	opt := h.Option("cf_dns_manager")
+	if opt == nil {
+		return nil, h.Errf("the cf_dns_manager global options block is required before using per-site cf_dns_manager directives")
+	}
+	appCfg, ok := opt.(httpcaddyfile.App)
+	if !ok {
+		return nil, h.Errf("internal error: cf_dns_manager global option has unexpected type %T", opt)
+	}
+	var app App
+	if err := json.Unmarshal(appCfg.Value, &app); err != nil {
+		return nil, h.Errf("internal error decoding cf_dns_manager global option: %v", err)
+	}
+	return app.Tunnels, nil
+}
+
+// tunnelIDIn looks a name up in a registry slice. It is the package-level
+// form of App.tunnelIDByName, for use during adapt when only the decoded
+// registry is in hand.
+func tunnelIDIn(tunnels []TunnelConfig, name string) (string, bool) {
+	for _, tc := range tunnels {
+		if tc.Name == name {
+			return tc.ID, true
+		}
+	}
+	return "", false
+}
+
+// unresolvedTunnelError explains why a host's tunnel name did not resolve.
+// A UUID-shaped value gets its own message, because that is the shape every
+// configuration written before the registry existed carries: the operator
+// moved nothing, and the error has to say where the UUID now belongs.
+func unresolvedTunnelError(h httpcaddyfile.Helper, name string, tunnels []TunnelConfig) error {
+	registered := make([]string, 0, len(tunnels))
+	for _, tc := range tunnels {
+		registered = append(registered, tc.Name)
+	}
+	sort.Strings(registered)
+
+	if isUUID(name) {
+		return h.Errf("tunnel takes the name of a tunnel registered in the global cf_dns_manager block, but %q looks like a UUID and no registration uses it; add `tunnel <name> %s` to the global block and reference the name here", name, name)
+	}
+	if len(registered) == 0 {
+		return h.Errf("tunnel %q is not registered; add `tunnel %s <uuid>` to the global cf_dns_manager block", name, name)
+	}
+	return h.Errf("tunnel %q is not registered; registered tunnels: %s", name, strings.Join(registered, ", "))
 }
 
 func boolPtr(b bool) *bool { return &b }
