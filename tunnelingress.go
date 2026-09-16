@@ -61,14 +61,18 @@ func deriveIngressPlan(hosts []HostConfig, defaultService string) map[string][]c
 				service = def
 			}
 			rules = append(rules, cfIngressRule{
-				Hostname: strings.ToLower(hc.Host),
-				Service:  service,
+				Hostname:      strings.ToLower(hc.Host),
+				Service:       service,
+				OriginRequest: ensureMatchSNIToHost(nil, service),
 			})
 		}
 		// The default rule has no hostname, which is what makes it match all
 		// traffic. It is always present: the API requires a terminating
 		// catch-all, and it is also the "default route" the config asks for.
-		rules = append(rules, cfIngressRule{Service: def})
+		rules = append(rules, cfIngressRule{
+			Service:       def,
+			OriginRequest: ensureMatchSNIToHost(nil, def),
+		})
 		plans[tunnelID] = rules
 	}
 	return plans
@@ -130,40 +134,42 @@ func mergeIngressPlan(current, plan []cfIngressRule, prunedHosts map[string]bool
 	merged = append(merged, preserved...)
 	merged = append(merged, plan...)
 
-	// Replacing a rule's service must not erase metadata the plugin does not
-	// manage. Descriptions, paths and origin requests are only carried over,
-	// never authored, so this is not an ownership claim: it is the same
-	// "don't destroy what you don't model" rule the raw-JSON fields follow.
+	// Replacing a rule's service must not erase options the plugin does not
+	// manage. Path and the origin-request options other than matchSNItoHost are
+	// only carried over, never authored, so this is not an ownership claim: it
+	// is the same "don't destroy what you don't model" rule the raw-JSON fields
+	// follow.
 	inheritUnmanagedFields(merged, current)
 
 	return merged, !ingressRulesEqual(current, merged), shadowed, pruned
 }
 
-// inheritUnmanagedFields copies the fields the plugin does not author —
-// description, path and originRequest — from the existing rule at the same
-// hostname (the empty hostname matching the catch-all).
+// inheritUnmanagedFields copies the fields the plugin does not author — path,
+// and any origin-request option other than matchSNItoHost — from the existing
+// rule at the same hostname (the empty hostname matching the catch-all).
 //
-// Without this, a declared host's rule is regenerated from the derived plan
-// and anything the operator set in the dashboard on that rule is lost. An
-// originRequest such as matchSNItoHost is the sharpest example: dropping it
-// makes cloudflared send the service URL's hostname as SNI, which Caddy
-// refuses for a wildcard-certificate site, turning every request into a 502.
+// Without this, a declared host's rule is regenerated from the derived plan and
+// anything the operator set in the dashboard on that rule is lost — an option
+// such as http2Origin or originServerName among it.
+//
+// matchSNItoHost is excluded from inheritance because the plugin authors it:
+// for an HTTPS service it is always enabled, so a rule that lost it is
+// corrected rather than left missing. The merge keeps every other option, so
+// this adds one key instead of replacing the object.
 //
 // A value already present on the derived rule wins, and nothing is ever
 // cleared: a rule with no counterpart keeps its empty fields.
 func inheritUnmanagedFields(merged, current []cfIngressRule) {
 	type unmanaged struct {
-		description   string
 		path          json.RawMessage
 		originRequest json.RawMessage
 	}
 	byHost := make(map[string]unmanaged, len(current))
 	for _, r := range current {
-		if r.Description == "" && len(r.Path) == 0 && len(r.OriginRequest) == 0 {
+		if len(r.Path) == 0 && len(r.OriginRequest) == 0 {
 			continue
 		}
 		byHost[strings.ToLower(r.Hostname)] = unmanaged{
-			description:   r.Description,
 			path:          r.Path,
 			originRequest: r.OriginRequest,
 		}
@@ -171,18 +177,47 @@ func inheritUnmanagedFields(merged, current []cfIngressRule) {
 	for i := range merged {
 		prev, ok := byHost[strings.ToLower(merged[i].Hostname)]
 		if !ok {
+			// Nothing to inherit, but the managed option still has to hold.
+			merged[i].OriginRequest = ensureMatchSNIToHost(merged[i].OriginRequest, merged[i].Service)
 			continue
-		}
-		if merged[i].Description == "" {
-			merged[i].Description = prev.description
 		}
 		if len(merged[i].Path) == 0 {
 			merged[i].Path = prev.path
 		}
-		if len(merged[i].OriginRequest) == 0 {
-			merged[i].OriginRequest = prev.originRequest
+		// Fold the operator's options under whatever the derived rule carries,
+		// then re-assert the managed key on the result.
+		base := merged[i].OriginRequest
+		if len(prev.originRequest) > 0 {
+			if len(base) == 0 {
+				base = prev.originRequest
+			} else if folded, ok := mergeOriginRequest(prev.originRequest, base); ok {
+				base = folded
+			}
 		}
+		merged[i].OriginRequest = ensureMatchSNIToHost(base, merged[i].Service)
 	}
+}
+
+// mergeOriginRequest overlays over onto under, so keys present in over win and
+// keys only in under survive. It reports false when either side is not a JSON
+// object, in which case the caller keeps what it had rather than guessing.
+func mergeOriginRequest(under, over json.RawMessage) (json.RawMessage, bool) {
+	opts := map[string]json.RawMessage{}
+	if err := json.Unmarshal(under, &opts); err != nil {
+		return nil, false
+	}
+	var overOpts map[string]json.RawMessage
+	if err := json.Unmarshal(over, &overOpts); err != nil {
+		return nil, false
+	}
+	for k, v := range overOpts {
+		opts[k] = v
+	}
+	merged, err := json.Marshal(opts)
+	if err != nil {
+		return nil, false
+	}
+	return merged, true
 }
 
 // wildcardMatches reports whether a wildcard hostname pattern (only "*." is
@@ -199,14 +234,16 @@ func wildcardMatches(pattern, host string) bool {
 }
 
 // ingressRulesEqual reports whether two rule slices are equivalent on the
-// fields the plugin manages: hostname and service.
+// fields the plugin manages: hostname, service, and whether matchSNItoHost is
+// enabled for an HTTPS service.
 //
 // Comparing only managed fields is deliberate. Cloudflare normalises what it
-// stores (it may add an empty originRequest object and it bumps version), so a
-// deep equality check against the server's rendering would report drift on
-// every run and issue a write on every reload — an idempotence bug that a
-// mock returning a fixed document would never reveal. Description, path and
-// originRequest are therefore all excluded.
+// stores (it may reorder or fill in origin-request options) and the operator
+// may set others the plugin does not model, so a deep equality check would
+// report drift on every run and issue a write on every reload — an idempotence
+// bug that a mock returning a fixed document would never reveal. Path and the
+// remaining origin-request options are therefore excluded, while the option the
+// plugin guarantees is compared explicitly, so a rule that lost it is repaired.
 func ingressRulesEqual(a, b []cfIngressRule) bool {
 	if len(a) != len(b) {
 		return false
@@ -216,6 +253,12 @@ func ingressRulesEqual(a, b []cfIngressRule) bool {
 			return false
 		}
 		if a[i].Service != b[i].Service {
+			return false
+		}
+		if wantsMatchSNIToHost(a[i].Service) != hasMatchSNIToHost(a[i].OriginRequest) {
+			return false
+		}
+		if wantsMatchSNIToHost(b[i].Service) != hasMatchSNIToHost(b[i].OriginRequest) {
 			return false
 		}
 	}

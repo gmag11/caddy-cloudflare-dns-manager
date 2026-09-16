@@ -1,3 +1,39 @@
+## ADDED Requirements
+
+### Requirement: HTTPS origins carry matchSNItoHost
+
+Every ingress rule the plugin writes whose service uses the `https://` scheme SHALL carry `originRequest.matchSNItoHost` set to true, including the catch-all rule. The plugin SHALL merge this option into any existing origin request rather than replacing it, so other options the operator set are preserved. A rule whose service is `https://` and which lacks the option SHALL be treated as drift and corrected. Rules whose service uses any other scheme SHALL be left without it.
+
+#### Scenario: Derived HTTPS rule carries the option
+
+- **WHEN** the plugin writes a rule for a host whose tunnel service is `https://caddy:443`
+- **THEN** the rule's origin request has `matchSNItoHost` set to true
+
+#### Scenario: Catch-all carries it too
+
+- **WHEN** `tunnel_default_service` is an `https://` service
+- **THEN** the catch-all rule the plugin emits also carries `matchSNItoHost`
+
+#### Scenario: Other options are preserved
+
+- **WHEN** a rule already carries `originRequest` with options such as `http2Origin`, and the plugin adds the managed option
+- **THEN** those options are present in the written rule alongside `matchSNItoHost`
+
+#### Scenario: A missing option is drift
+
+- **WHEN** a declared host's HTTPS rule exists without `matchSNItoHost`
+- **THEN** the configuration is rewritten so the option is set
+
+#### Scenario: A rule that already has it is not drift
+
+- **WHEN** a declared host's HTTPS rule already enables `matchSNItoHost`
+- **THEN** no write is issued for that configuration
+
+#### Scenario: Non-HTTPS services are left alone
+
+- **WHEN** a rule's service uses `http://`, `http_status:`, or a non-HTTP scheme
+- **THEN** the plugin does not add `matchSNItoHost` to it
+
 ## REMOVED Requirements
 
 ### Requirement: Rules carry the instance ownership tag
@@ -34,24 +70,21 @@ Rules removed from the configuration SHALL NOT be deleted from the tunnel, excep
 
 ### Requirement: Unmanaged rule metadata is preserved
 
-Ingress rules carry fields the plugin does not manage, notably a human-readable `description`, a `path` and an `originRequest`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
+Ingress rules carry fields the plugin does not manage, notably a `path` and origin-request options other than `matchSNItoHost`. Because a write replaces the whole configuration, the plugin SHALL preserve those fields: on rules it does not declare (kept verbatim) and on rules it rewrites, where a non-empty value SHALL be carried over from the rule currently at the same hostname. The plugin SHALL NOT author or clear them, and such a field appearing on its own SHALL NOT be treated as drift.
 
-Preserving `originRequest` is load-bearing rather than cosmetic: an option such as `matchSNItoHost` cannot be expressed by the plugin, and losing it makes `cloudflared` present the service URL's hostname as SNI, which a wildcard-certificate origin rejects, turning every request into a 502.
+`matchSNItoHost` is excluded from this inheritance because the plugin authors it: for an HTTPS service it is always enabled, so it is re-asserted from the service rather than inherited.
+
+The `description` field is not modelled at all. It is absent from Cloudflare's documented ingress model and the dashboard never sets it, while a write that omits the key clears any stored value. The plugin therefore does not participate in the field.
 
 #### Scenario: Foreign rule keeps its metadata
 
-- **WHEN** an undeclared rule carries a description and an origin request, and the plugin writes the configuration
-- **THEN** both are present and unchanged in the written configuration
+- **WHEN** an undeclared rule carries a path or an origin-request option such as `http2Origin`, and the plugin writes the configuration
+- **THEN** they are present and unchanged in the written configuration
 
-#### Scenario: Rewritten rule keeps its description
+#### Scenario: Rewritten rule keeps its origin-request options
 
-- **WHEN** a declared host's rule has a stale service and a description set outside the plugin
-- **THEN** the written rule carries the corrected service and the original description
-
-#### Scenario: Rewritten rule keeps its origin request
-
-- **WHEN** a declared host's rule has a stale service and an `originRequest` such as `matchSNItoHost`
-- **THEN** the written rule carries the corrected service and the original `originRequest`
+- **WHEN** a declared host's rule has a stale service and an `originRequest` carrying options other than the managed one
+- **THEN** the written rule carries the corrected service and the original options
 
 #### Scenario: Rewritten rule keeps its path
 
@@ -60,15 +93,15 @@ Preserving `originRequest` is load-bearing rather than cosmetic: an option such 
 
 #### Scenario: Catch-all metadata preserved
 
-- **WHEN** the existing catch-all carries a description or an origin request and the plugin re-emits the default rule
-- **THEN** they are carried over to the emitted catch-all
+- **WHEN** the existing catch-all carries an origin-request option and the plugin re-emits the default rule
+- **THEN** the option is carried over to the emitted catch-all
 
 #### Scenario: An unmanaged field alone is not drift
 
 - **WHEN** the only difference between the stored configuration and the derived plan is an unmanaged field
 - **THEN** no write is issued and the field is left intact
 
-#### Scenario: Metadata is never invented
+#### Scenario: Descriptions are not managed
 
-- **WHEN** a declared host has no existing rule to inherit from
-- **THEN** its derived rule is written with no description, path or origin request
+- **WHEN** the plugin writes a rule
+- **THEN** it does not set or preserve a `description`, because the field is outside Cloudflare's documented model and the dashboard never populates it

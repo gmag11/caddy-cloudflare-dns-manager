@@ -48,6 +48,15 @@
 - [x] 5.6 Update `docs/architecture.md`: the ingress phase now consumes the DNS phase's pruned-name set, and why the correlation replaced the tag
 - [x] 5.7 Update the README's tunnel section accordingly
 
+## 5b. matchSNItoHost for HTTPS origins
+
+- [x] 5b.1 Author `matchSNItoHost: true` on every derived rule whose service is `https://`, catch-all included, so a tunnel host works without hand-editing the route
+- [x] 5b.2 Merge the key into the existing `originRequest` instead of replacing the object, preserving options such as `http2Origin`
+- [x] 5b.3 Treat a missing `matchSNItoHost` on an HTTPS rule as drift, so a route that lost it is repaired; leave non-HTTPS services untouched
+- [x] 5b.4 Remove the `description` field from the rule model: it is absent from Cloudflare's documented ingress model and the dashboard never sets it, so the plugin does not participate in it
+- [x] 5b.5 Tests: HTTPS rules gain the option (including the catch-all), non-HTTPS rules do not, a missing option is drift, other origin-request options survive, and the merge helper's precedence rules
+- [x] 5b.6 E2E-verified: stripped `originRequest` from all three live routes, reconciled, and the plugin restored `matchSNItoHost` on every rule with the tunnel returning 200 on the first request
+
 ## 6. Verification
 
 - [x] 6.1 Run `go build ./...`, `go vet ./...`, `gofmt -l .` and the full `go test ./...`

@@ -379,20 +379,29 @@ ingress:
 #### HTTPS origin and `matchSNItoHost`
 
 The default SNI when connecting to your HTTPS origin is the *service URL's*
-hostname (`caddy`), which will not match a certificate issue for your public
+hostname (`caddy`), which will not match a certificate issued for your public
 hostnames. `matchSNItoHost: true` makes `cloudflared` send the request's `Host`
 as SNI, so Caddy presents the matching certificate (e.g. its `*.example.com`
 wildcard) for every host. This is what makes the catch-all work with HTTPS and
 multiple hosts.
 
+**The plugin sets this for you.** Every rule it writes whose service is
+`https://` carries `originRequest.matchSNItoHost: true`, including the catch-all.
+You do not add it by hand, and a rule that loses it is repaired on the next
+reconcile. The plugin merges its key into the existing origin request rather than
+replacing it, so options you set yourself are preserved.
+
+It is only added for `https://` services: a plain `http://` origin performs no
+TLS handshake, so the option would be meaningless.
+
 Alternatives, and why they are worse here:
 
 | Option | Works with many hosts? | Notes |
 | --- | --- | --- |
-| `matchSNItoHost: true` | ✅ | SNI follows the request `Host`. **Preferred.** |
-| `originServerName: <host>` | ❌ | A single fixed SNI; breaks the second host. Use only per-host rules. |
+| `matchSNItoHost: true` | ✅ | SNI follows the request `Host`. **Set automatically by the plugin.** |
+| `originServerName: <host>` | ❌ | A single fixed SNI; breaks the second host. Use only per-host rules, and note it can conflict with the managed option. |
 | `noTLSVerify: true` | ✅ | Disables origin verification; last resort only. |
-| Origin over plain `http://` | ✅ | Only if the origin does not redirect HTTP→HTTPS. |
+| Origin over plain `http://` | ✅ | Only if the origin does not redirect HTTP→HTTPS. No SNI involved. |
 
 #### Scoping: wildcard or per-host rules
 

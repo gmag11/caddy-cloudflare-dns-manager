@@ -74,28 +74,11 @@ identity from the token. On startup the plugin reconciles DNS and ingress:
 
 - creates a proxied CNAME `git.<CF_ZONE> → <CF_TUNNEL_ID>.cfargotunnel.com`;
 - writes the tunnel's ingress plan — one rule per declared host plus the
-  catch-all from `tunnel_default_service`.
-
-> **The tunnel's rules need `matchSNItoHost: true`, and the plugin does not
-> write it.** The plugin manages `hostname` and `service`, not origin settings,
-> so add it yourself once the plan exists — in the dashboard, or with the API:
->
-> ```bash
-> # fetch the config, add originRequest.matchSNItoHost to each rule, PUT it back
-> ACC=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE" \
->   -H "Authorization: Bearer $CF_API_TOKEN" | jq -r '.result[0].account.id')
-> curl -s "https://api.cloudflare.com/client/v4/accounts/$ACC/cfd_tunnel/$CF_TUNNEL_ID/configurations" \
->   -H "Authorization: Bearer $CF_ACCOUNT_TUNNEL_TOKEN" \
->   | jq '.result.config | (.ingress[] |= . + {originRequest:{matchSNItoHost:true}})' > /tmp/cfg.json
-> curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/cfd_tunnel/$CF_TUNNEL_ID/configurations" \
->   -H "Authorization: Bearer $CF_ACCOUNT_TUNNEL_TOKEN" -H "Content-Type: application/json" \
->   -d "{\"config\":$(cat /tmp/cfg.json)}"
-> ```
->
-> Without it, `cloudflared` sends the service URL's hostname (`caddy`) as SNI,
-> Caddy has no certificate for that name, and every request returns 502/522
-> (`remote error: tls: internal error`). The plugin preserves `originRequest`
-> on every write, so the setting survives reconciliation.
+  catch-all from `tunnel_default_service`;
+- sets `originRequest.matchSNItoHost` on every rule whose service is `https://`,
+  which this harness needs because Caddy serves a `*.<CF_ZONE>` certificate.
+  No manual step: without it the TLS handshake to the origin fails and every
+  request returns 502.
 
 > **Ingress changes need no recreate.** The tunnel is remotely-managed:
 > Cloudflare holds the configuration and `cloudflared` syncs it. Editing the

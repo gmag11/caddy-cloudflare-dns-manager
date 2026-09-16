@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // tunnelClient talks to the Cloudflare Tunnel configuration API. It reuses the
@@ -47,21 +48,79 @@ type cfTunnelConfig struct {
 	WarpRouting   json.RawMessage `json:"warp-routing,omitempty"`
 }
 
-// cfIngressRule is one ingress rule. Only Hostname and Service are managed by
-// the plugin; Description, Path and OriginRequest are carried through untouched
-// so rules authored outside the plugin survive a write.
+// cfIngressRule is one ingress rule. The plugin manages Hostname, Service and
+// the matchSNItoHost setting inside OriginRequest; Path and the rest of
+// OriginRequest are carried through untouched so rules and options authored
+// outside the plugin survive a write.
 //
-// Description is modelled explicitly rather than left to the JSON decoder: a
-// field the struct does not know about is dropped silently on the next write,
-// which would erase a description set in the dashboard. Path and OriginRequest
-// are raw JSON for the same round-trip reason, and Path is raw so its absence
-// stays absent rather than becoming an empty string.
+// Description is deliberately NOT modelled. It is absent from Cloudflare's
+// documented ingress model, the dashboard does not render it, and a write that
+// omits the key clears any value stored there (verified against the live API).
+// Since the plugin must write this resource, it cannot both omit the field and
+// preserve it; the choice is to not participate in a half-released feature.
+//
+// Path and the unknown parts of OriginRequest are raw JSON so their absence
+// stays absent rather than becoming zero values, and so fields the plugin does
+// not model round-trip byte for byte.
 type cfIngressRule struct {
 	Hostname      string          `json:"hostname,omitempty"`
 	Service       string          `json:"service"`
-	Description   string          `json:"description,omitempty"`
 	Path          json.RawMessage `json:"path,omitempty"`
 	OriginRequest json.RawMessage `json:"originRequest,omitempty"`
+}
+
+// matchSNIToHostOption is the origin-request key the plugin manages. It makes
+// cloudflared send the request's Host as the TLS SNI to the origin, which a
+// wildcard-certificate origin (e.g. Caddy serving *.example.com) requires: the
+// default SNI is the service URL's hostname, for which such an origin has no
+// certificate, turning every request into a 502.
+const matchSNIToHostOption = "matchSNItoHost"
+
+// wantsMatchSNIToHost reports whether a service should carry matchSNItoHost.
+// Only HTTPS origins involve a TLS handshake to the origin, so for any other
+// service the option is meaningless and the plugin leaves it alone.
+func wantsMatchSNIToHost(service string) bool {
+	return strings.HasPrefix(service, "https://")
+}
+
+// ensureMatchSNIToHost returns the origin request for a service, guaranteeing
+// matchSNItoHost is true for HTTPS services. Any other option already present
+// is preserved: this merges one key, it does not replace the object.
+func ensureMatchSNIToHost(existing json.RawMessage, service string) json.RawMessage {
+	if !wantsMatchSNIToHost(service) {
+		return existing
+	}
+	opts := map[string]json.RawMessage{}
+	if len(existing) > 0 {
+		// A malformed value is left untouched rather than replaced, so a
+		// hand-edited configuration is never silently discarded.
+		if err := json.Unmarshal(existing, &opts); err != nil {
+			return existing
+		}
+	}
+	if v, ok := opts[matchSNIToHostOption]; ok && string(v) == "true" {
+		return existing
+	}
+	opts[matchSNIToHostOption] = json.RawMessage("true")
+	merged, err := json.Marshal(opts)
+	if err != nil {
+		return existing
+	}
+	return merged
+}
+
+// hasMatchSNIToHost reports whether a rule's origin request enables the option.
+func hasMatchSNIToHost(originRequest json.RawMessage) bool {
+	if len(originRequest) == 0 {
+		return false
+	}
+	var opts struct {
+		MatchSNIToHost bool `json:"matchSNItoHost"`
+	}
+	if err := json.Unmarshal(originRequest, &opts); err != nil {
+		return false
+	}
+	return opts.MatchSNIToHost
 }
 
 // cfTunnelConfiguration is the API envelope's result object.

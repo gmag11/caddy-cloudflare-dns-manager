@@ -199,9 +199,15 @@ https://caddy:443` sends SNI `caddy`, and a Caddy site using a wildcard
 certificate (`*.example.com`) has no certificate for that name. The handshake
 fails and every request becomes a 502/522.
 
-Fix: add `originRequest.matchSNItoHost: true` to the tunnel's rules, so SNI
-follows the request's `Host`. Set it in the dashboard or via the API; the plugin
-preserves it on every write, so it survives reconciliation.
+**The plugin sets `originRequest.matchSNItoHost: true` on every rule whose
+service is `https://`, so this should not happen.** If you still see it:
+
+- Check the rule's service scheme. The option is only added for `https://`; a
+  plain `http://` origin performs no TLS handshake and never needed it.
+- Check whether something external rewrote the route. The plugin repairs a
+  missing option on the next reconcile, so a single reload should clear it.
+- If a rule carries `originServerName`, that pins the SNI deliberately. The
+  plugin does not remove it, and the two options can conflict — drop one.
 
 ```
 # cloudflared log

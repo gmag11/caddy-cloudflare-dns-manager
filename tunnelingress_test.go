@@ -13,8 +13,6 @@ import (
 const (
 	testTunnelA = "8a7f3c2e-1234-4567-89ab-cdef01234567"
 	testTunnelB = "1b2c3d4e-5678-49ab-9cde-f01234567890"
-	// testTag is the ownership marker written into rule descriptions.
-	testTag = "caddy-cf-dns:test-host"
 )
 
 // --- Group 3: plan derivation and merge -------------------------------------
@@ -140,56 +138,6 @@ func TestDeriveIngressPlanFailClosedDefault(t *testing.T) {
 	}
 }
 
-// TestDeriveIngressPlanDoesNotAuthorDescription: the plugin no longer writes an
-// ownership marker into rule descriptions. The field is undocumented in the API
-// model and the dashboard clears it when a rule is edited, so relying on it
-// would be fragile; route cleanup keys off the DNS record instead.
-func TestDeriveIngressPlanDoesNotAuthorDescription(t *testing.T) {
-	rules := deriveIngressPlan([]HostConfig{
-		{Host: "git.example.com", TunnelID: testTunnelA},
-		{Host: "ha.example.com", TunnelID: testTunnelA},
-	}, "")[testTunnelA]
-
-	if len(rules) != 3 {
-		t.Fatalf("got %d rules, want 3", len(rules))
-	}
-	for i, r := range rules {
-		if r.Description != "" {
-			t.Errorf("rule %d description = %q, want it left unauthored", i, r.Description)
-		}
-	}
-}
-
-// TestDeriveIngressPlanPreservesOperatorDescription checks the other direction:
-// a description the plugin finds on a declared rule is carried through, not
-// cleared.
-func TestDeriveIngressPlanPreservesOperatorDescription(t *testing.T) {
-	current := []cfIngressRule{
-		{Hostname: "git.example.com", Service: "http://stale:80", Description: "set by hand"},
-		{Service: "http://stale:80"},
-	}
-	plan := deriveIngressPlan([]HostConfig{
-		{Host: "git.example.com", TunnelID: testTunnelA},
-	}, "https://caddy:443")[testTunnelA]
-
-	merged, _, _, _ := mergeIngressPlan(current, plan, nil)
-
-	var host, catchAll string
-	for _, r := range merged {
-		if r.Hostname == "git.example.com" {
-			host = r.Description
-		} else {
-			catchAll = r.Description
-		}
-	}
-	if host != "set by hand" {
-		t.Errorf("declared rule description = %q, want it preserved", host)
-	}
-	if catchAll != "" {
-		t.Errorf("catch-all description = %q, want it left unauthored", catchAll)
-	}
-}
-
 func TestDeriveIngressPlanEmptyConfig(t *testing.T) {
 	if plans := deriveIngressPlan(nil, ""); len(plans) != 0 {
 		t.Fatalf("got %d plans for no hosts, want 0", len(plans))
@@ -312,19 +260,83 @@ func TestWildcardMatchesAnyDepth(t *testing.T) {
 }
 
 func TestIngressRulesEqualIgnoresUnmanagedFields(t *testing.T) {
-	a := []cfIngressRule{{Hostname: "git.example.com", Service: "https://caddy:443"}}
+	sni := json.RawMessage(`{"matchSNItoHost":true}`)
+	a := []cfIngressRule{{Hostname: "git.example.com", Service: "https://caddy:443", OriginRequest: sni}}
 	b := []cfIngressRule{{
 		Hostname:      "git.example.com",
 		Service:       "https://caddy:443",
-		OriginRequest: json.RawMessage(`{}`), // server-side normalisation
+		OriginRequest: json.RawMessage(`{"http2Origin":true,"matchSNItoHost":true}`), // extra option
 	}}
 	if !ingressRulesEqual(a, b) {
-		t.Error("normalised originRequest must not count as drift")
+		t.Error("another origin-request option must not count as drift")
 	}
 
 	c := []cfIngressRule{{Hostname: "git.example.com", Service: "http://other:80"}}
 	if ingressRulesEqual(a, c) {
 		t.Error("a different service must count as drift")
+	}
+}
+
+// TestIngressHTTPSRuleWithoutSNIIsDrift: the plugin guarantees matchSNItoHost on
+// HTTPS services, so a rule missing it is corrected. Without this the origin
+// handshake fails for a wildcard-certificate origin and every request 502s.
+func TestIngressHTTPSRuleWithoutSNIIsDrift(t *testing.T) {
+	without := []cfIngressRule{{Hostname: "git.example.com", Service: "https://caddy:443"}}
+	with := []cfIngressRule{{
+		Hostname:      "git.example.com",
+		Service:       "https://caddy:443",
+		OriginRequest: json.RawMessage(`{"matchSNItoHost":true}`),
+	}}
+	if ingressRulesEqual(without, with) {
+		t.Error("an HTTPS rule missing matchSNItoHost must count as drift")
+	}
+}
+
+// TestIngressNonHTTPSServiceNeedsNoSNI: only HTTPS origins involve a TLS
+// handshake, so other services are left alone.
+func TestIngressNonHTTPSServiceNeedsNoSNI(t *testing.T) {
+	plain := []cfIngressRule{{Hostname: "git.example.com", Service: "http://caddy:80"}}
+	status := []cfIngressRule{{Hostname: "git.example.com", Service: "http_status:404"}}
+	if !ingressRulesEqual(plain, plain) || !ingressRulesEqual(status, status) {
+		t.Error("a non-HTTPS service must not require matchSNItoHost")
+	}
+	for _, r := range []cfIngressRule{plain[0], status[0]} {
+		if got := ensureMatchSNIToHost(nil, r.Service); len(got) != 0 {
+			t.Errorf("service %q gained an origin request: %s", r.Service, got)
+		}
+	}
+}
+
+// TestEnsureMatchSNIToHostMerges pins the merge behaviour: one key is added,
+// every other option is preserved.
+func TestEnsureMatchSNIToHostMerges(t *testing.T) {
+	got := ensureMatchSNIToHost(json.RawMessage(`{"http2Origin":true}`), "https://caddy:443")
+	var opts map[string]bool
+	if err := json.Unmarshal(got, &opts); err != nil {
+		t.Fatalf("result is not a JSON object: %s", got)
+	}
+	if !opts["matchSNItoHost"] {
+		t.Errorf("matchSNItoHost not set: %s", got)
+	}
+	if !opts["http2Origin"] {
+		t.Errorf("existing option was dropped: %s", got)
+	}
+
+	// Already correct: the value is returned untouched.
+	orig := json.RawMessage(`{"matchSNItoHost":true}`)
+	if string(ensureMatchSNIToHost(orig, "https://caddy:443")) != string(orig) {
+		t.Error("an already-enabled rule must be returned unchanged")
+	}
+
+	// A non-HTTPS service is never given the key.
+	if got := ensureMatchSNIToHost(nil, "http://caddy:80"); len(got) != 0 {
+		t.Errorf("non-HTTPS service gained an origin request: %s", got)
+	}
+
+	// Malformed existing JSON is left alone rather than replaced.
+	bad := json.RawMessage(`not-json`)
+	if string(ensureMatchSNIToHost(bad, "https://caddy:443")) != string(bad) {
+		t.Error("malformed origin request must be preserved, not replaced")
 	}
 }
 
@@ -408,8 +420,8 @@ func TestIngressUpdatesOnDrift(t *testing.T) {
 func TestIngressIdempotentUnderServerNormalisation(t *testing.T) {
 	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
 		Ingress: []cfIngressRule{
-			{Hostname: "git.example.com", Service: "https://caddy:443", Description: testTag},
-			{Service: "https://caddy:443", Description: testTag},
+			{Hostname: "git.example.com", Service: "https://caddy:443", OriginRequest: json.RawMessage(`{"matchSNItoHost":true}`)},
+			{Service: "https://caddy:443", OriginRequest: json.RawMessage(`{"matchSNItoHost":true}`)},
 		},
 	})
 	m.setNormalize(true)
@@ -687,109 +699,6 @@ func TestIngressWarnsOnShadowingWildcard(t *testing.T) {
 	}
 }
 
-func TestIngressPreservesForeignRuleDescription(t *testing.T) {
-	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
-		Ingress: []cfIngressRule{
-			{Hostname: "other.example.com", Service: "http://other:8080", Description: "managed by hand"},
-		},
-	})
-	app := newIngressTestApp(t, m, "https://caddy:443")
-
-	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := runIngress(app, hosts); err != nil {
-		t.Fatalf("reconcile ingress: %v", err)
-	}
-
-	for _, r := range m.lastPut().Ingress {
-		if r.Hostname == "other.example.com" {
-			if r.Description != "managed by hand" {
-				t.Errorf("foreign rule description = %q, want it preserved", r.Description)
-			}
-			return
-		}
-	}
-	t.Fatal("foreign rule missing from the written configuration")
-}
-
-// TestIngressKeepsOperatorDescriptionOnRewrittenRule: the plugin does not
-// author descriptions, so correcting a rule's service must carry the
-// operator's description through rather than clearing it.
-func TestIngressKeepsOperatorDescriptionOnRewrittenRule(t *testing.T) {
-	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
-		Ingress: []cfIngressRule{
-			{Hostname: "git.example.com", Service: "http://stale:80", Description: "set in dashboard"},
-			{Service: "http_status:404", Description: "catch-all note"},
-		},
-	})
-	app := newIngressTestApp(t, m, "https://caddy:443")
-
-	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := runIngress(app, hosts); err != nil {
-		t.Fatalf("reconcile ingress: %v", err)
-	}
-	if m.putCount() != 1 {
-		t.Fatalf("got %d writes, want 1 (the stale service must be corrected)", m.putCount())
-	}
-
-	for _, r := range m.lastPut().Ingress {
-		if r.Hostname == "git.example.com" {
-			if r.Service != "https://caddy:443" {
-				t.Errorf("service = %q, want it corrected", r.Service)
-			}
-			if r.Description != "set in dashboard" {
-				t.Errorf("description = %q, want it preserved", r.Description)
-			}
-		}
-	}
-}
-
-// TestIngressNoWriteWhenOnlyDescriptionDiffers: since the plugin does not
-// manage the field, a description appearing or changing is not drift.
-func TestIngressNoWriteWhenOnlyDescriptionDiffers(t *testing.T) {
-	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
-		Ingress: []cfIngressRule{
-			{Hostname: "git.example.com", Service: "https://caddy:443", Description: "added later"},
-			{Service: "https://caddy:443"},
-		},
-	})
-	app := newIngressTestApp(t, m, "https://caddy:443")
-
-	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := runIngress(app, hosts); err != nil {
-		t.Fatalf("reconcile ingress: %v", err)
-	}
-
-	if m.putCount() != 0 {
-		t.Errorf("got %d writes, want 0: description is not a managed field", m.putCount())
-	}
-}
-
-// TestIngressForeignRuleKeepsDescription: an undeclared rule is written back
-// verbatim, description included.
-func TestIngressForeignRuleKeepsDescription(t *testing.T) {
-	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
-		Ingress: []cfIngressRule{
-			{Hostname: "other.example.com", Service: "http://other:8080", Description: "someone else's note"},
-		},
-	})
-	app := newIngressTestApp(t, m, "https://caddy:443")
-
-	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
-	if err := runIngress(app, hosts); err != nil {
-		t.Fatalf("reconcile ingress: %v", err)
-	}
-
-	for _, r := range m.lastPut().Ingress {
-		if r.Hostname == "other.example.com" {
-			if r.Description != "someone else's note" {
-				t.Errorf("foreign description = %q, want it untouched", r.Description)
-			}
-			return
-		}
-	}
-	t.Fatal("foreign rule missing from the written configuration")
-}
-
 // --- route prune, keyed off the DNS record ----------------------------------
 
 // runIngressPruning drives the phase the way Reconcile does when the DNS pass
@@ -1063,25 +972,23 @@ func TestMergeIngressPlanPrunedSetIsExact(t *testing.T) {
 }
 
 // TestInheritUnmanagedFieldsDirect exercises the helper's precedence rules.
-// Description is not part of it: the plugin authors that field.
+// matchSNItoHost is not inherited: the plugin authors it, so it is re-asserted
+// from the service instead.
 func TestInheritUnmanagedFieldsDirect(t *testing.T) {
 	merged := []cfIngressRule{
-		{Hostname: "a.example.com", Service: "s", Description: testTag},
+		{Hostname: "a.example.com", Service: "s"},
 		{Hostname: "b.example.com", Service: "s", Path: json.RawMessage(`"/derived"`)},
-		{Service: "s", Description: testTag},
+		{Service: "s"},
 	}
 	current := []cfIngressRule{
-		{Hostname: "a.example.com", Service: "old", Description: "from current", OriginRequest: json.RawMessage(`{"x":1}`)},
+		{Hostname: "a.example.com", Service: "old", OriginRequest: json.RawMessage(`{"x":1}`)},
 		{Hostname: "b.example.com", Service: "old", Path: json.RawMessage(`"/current"`), OriginRequest: json.RawMessage(`{"y":2}`)},
-		{Service: "old", Description: "catch-all from current", OriginRequest: json.RawMessage(`{"z":3}`)},
+		{Service: "old", OriginRequest: json.RawMessage(`{"z":3}`)},
 	}
 	inheritUnmanagedFields(merged, current)
 
 	if string(merged[0].OriginRequest) != `{"x":1}` {
 		t.Errorf("originRequest not inherited: %s", merged[0].OriginRequest)
-	}
-	if merged[0].Description != testTag {
-		t.Errorf("description must come from the plan, not be inherited: %q", merged[0].Description)
 	}
 	if string(merged[1].Path) != `"/derived"` {
 		t.Errorf("existing path must win: %s", merged[1].Path)
@@ -1093,8 +1000,8 @@ func TestInheritUnmanagedFieldsDirect(t *testing.T) {
 		t.Errorf("catch-all (empty hostname) not matched: %s", merged[2].OriginRequest)
 	}
 
-	// A rule with no counterpart keeps empty fields rather than inheriting
-	// unrelated metadata.
+	// A rule with no counterpart keeps its unmanaged fields rather than
+	// inheriting unrelated metadata.
 	fresh := []cfIngressRule{{Hostname: "new.example.com", Service: "s"}}
 	inheritUnmanagedFields(fresh, current)
 	if len(fresh[0].OriginRequest) != 0 || len(fresh[0].Path) != 0 {
@@ -1146,6 +1053,106 @@ func TestMergePreservesPathOnRewrittenRule(t *testing.T) {
 
 	if string(merged[0].Path) != string(path) {
 		t.Errorf("rewritten host rule lost its path: %s", merged[0].Path)
+	}
+}
+
+// TestIngressAddsMatchSNIToHostForHTTPSService is the behaviour the feature
+// exists for: every rule the plugin writes for an HTTPS service carries
+// matchSNItoHost, including the catch-all, without the operator configuring it.
+func TestIngressAddsMatchSNIToHostForHTTPSService(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+	if m.putCount() != 1 {
+		t.Fatalf("got %d writes, want 1", m.putCount())
+	}
+
+	for _, r := range m.lastPut().Ingress {
+		if !hasMatchSNIToHost(r.OriginRequest) {
+			t.Errorf("rule %q (service %s) is missing matchSNItoHost: %s",
+				r.Hostname, r.Service, r.OriginRequest)
+		}
+	}
+}
+
+// TestIngressLeavesNonHTTPSServiceAlone: the option only makes sense for a TLS
+// origin, so an http:// service must not gain it.
+func TestIngressLeavesNonHTTPSServiceAlone(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{})
+	app := newIngressTestApp(t, m, "http://caddy:80")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	for _, r := range m.lastPut().Ingress {
+		if hasMatchSNIToHost(r.OriginRequest) {
+			t.Errorf("non-HTTPS rule %q gained matchSNItoHost: %s", r.Hostname, r.OriginRequest)
+		}
+	}
+}
+
+// TestIngressRepairsRuleThatLostMatchSNIToHost: the field is managed, so a rule
+// missing it is drift and is corrected on reconcile.
+func TestIngressRepairsRuleThatLostMatchSNIToHost(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "git.example.com", Service: "https://caddy:443"}, // lost the option
+			{Service: "https://caddy:443"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	if m.putCount() != 1 {
+		t.Fatalf("got %d writes, want 1: a missing matchSNItoHost is drift", m.putCount())
+	}
+	for _, r := range m.lastPut().Ingress {
+		if !hasMatchSNIToHost(r.OriginRequest) {
+			t.Errorf("rule %q was not repaired: %s", r.Hostname, r.OriginRequest)
+		}
+	}
+}
+
+// TestIngressKeepsOtherOriginRequestOptions: adding the managed key must not
+// drop the options the operator set, such as http2Origin.
+func TestIngressKeepsOtherOriginRequestOptions(t *testing.T) {
+	m := newMockTunnelAPI(t, testTunnelA, cfTunnelConfig{
+		Ingress: []cfIngressRule{
+			{Hostname: "git.example.com", Service: "http://stale:80", OriginRequest: json.RawMessage(`{"http2Origin":true}`)},
+			{Service: "https://caddy:443"},
+		},
+	})
+	app := newIngressTestApp(t, m, "https://caddy:443")
+
+	hosts := []HostConfig{{Host: "git.example.com", TunnelID: testTunnelA}}
+	if err := runIngress(app, hosts); err != nil {
+		t.Fatalf("reconcile ingress: %v", err)
+	}
+
+	var opts map[string]bool
+	for _, r := range m.lastPut().Ingress {
+		if r.Hostname != "git.example.com" {
+			continue
+		}
+		if err := json.Unmarshal(r.OriginRequest, &opts); err != nil {
+			t.Fatalf("origin request is not an object: %s", r.OriginRequest)
+		}
+	}
+	if !opts["matchSNItoHost"] {
+		t.Errorf("matchSNItoHost not set: %v", opts)
+	}
+	if !opts["http2Origin"] {
+		t.Errorf("http2Origin was dropped: %v", opts)
 	}
 }
 
