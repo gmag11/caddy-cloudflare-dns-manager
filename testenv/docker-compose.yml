@@ -25,6 +25,8 @@ services:
       - "443:443/udp"
     networks:
       - default
+    depends_on:
+      - cloudflared
     restart: "no"
 
   # cloudflared runs the remotely-managed test tunnel. It connects outbound to
@@ -51,8 +53,6 @@ services:
     networks:
       - default
     restart: "no"
-    depends_on:
-      - caddy
 
 volumes:
   caddy_data:
