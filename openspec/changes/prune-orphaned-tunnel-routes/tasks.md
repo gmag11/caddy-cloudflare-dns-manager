@@ -38,19 +38,19 @@
 
 ## 5. Documentation
 
-- [ ] 5.1 Document in `docs/cloudflare-tunnel.md` that route cleanup is driven by DNS prune: a route is removed when the plugin deletes the record that made its hostname reachable
-- [ ] 5.2 State the limit plainly: removing the last tunnel host prunes the record and leaves the route, with a log line pointing at manual removal
-- [ ] 5.3 Remove the documentation that described the ownership tag on routes, including the Description-column note and the "tag alone never authorises deletion" wording
-- [ ] 5.4 Add a troubleshooting entry for a route that was pruned and how to restore it (re-declare the host)
-- [ ] 5.5 Add a troubleshooting entry for the "no tunnel declared" case
-- [ ] 5.6 Update `docs/architecture.md`: the ingress phase now consumes the DNS phase's pruned-name set, and why the correlation replaced the tag
-- [ ] 5.7 Update the README's tunnel section accordingly
+- [x] 5.1 Document in `docs/cloudflare-tunnel.md` that route cleanup is driven by DNS prune: a route is removed when the plugin deletes the record that made its hostname reachable
+- [x] 5.2 State the limit plainly: removing the last tunnel host prunes the record and leaves the route, with a log line pointing at manual removal
+- [x] 5.3 Remove the documentation that described the ownership tag on routes, including the Description-column note and the "tag alone never authorises deletion" wording
+- [x] 5.4 Add a troubleshooting entry for a route that was pruned and how to restore it (re-declare the host)
+- [x] 5.5 Add a troubleshooting entry for the "no tunnel declared" case
+- [x] 5.6 Update `docs/architecture.md`: the ingress phase now consumes the DNS phase's pruned-name set, and why the correlation replaced the tag
+- [x] 5.7 Update the README's tunnel section accordingly
 
 ## 6. Verification
 
-- [ ] 6.1 Run `go build ./...`, `go vet ./...`, `gofmt -l .` and the full `go test ./...`
-- [ ] 6.2 Run `openspec validate prune-orphaned-tunnel-routes --strict`
-- [ ] 6.3 Confirm the regression baseline: with no `prune` opt-in the pre-existing suite passes unchanged
-- [ ] 6.4 Manual E2E in `testenv`: remove one tunnel host among several, confirm its DNS record and its route are both gone, and that a declared host keeps its `originRequest`
-- [ ] 6.5 Manual E2E negative: with a tunnel host's DNS record left in place, confirm its route is preserved
+- [x] 6.1 Run `go build ./...`, `go vet ./...`, `gofmt -l .` and the full `go test ./...`
+- [x] 6.2 Run `openspec validate prune-orphaned-tunnel-routes --strict`
+- [x] 6.3 Confirm the regression baseline: with no `prune` opt-in the pre-existing suite passes unchanged
+- [x] 6.4 Manual E2E in `testenv`: removed one tunnel host among several; its CNAME was pruned and its route deleted in the same run (`pruned_routes: 1`), with a declared host's `originRequest` intact
+- [x] 6.5 Manual E2E negative: a declared host's route survives even when its name appears in the pruned set
 - [ ] 6.6 Manual E2E for the documented limit: remove the last tunnel host and confirm the log line about manual removal appears
