@@ -55,4 +55,4 @@
 - [x] 6.3 Confirm the regression baseline: with no `prune` opt-in the pre-existing suite passes unchanged
 - [x] 6.4 Manual E2E in `testenv`: removed one tunnel host among several; its CNAME was pruned and its route deleted in the same run (`pruned_routes: 1`), with a declared host's `originRequest` intact
 - [x] 6.5 Manual E2E negative: a declared host's route survives even when its name appears in the pruned set
-- [ ] 6.6 Manual E2E for the documented limit: remove the last tunnel host and confirm the log line about manual removal appears
+- [x] 6.6 Manual E2E for the documented limit: removed the last tunnel host, confirmed the DNS record was pruned while the orphan route was left in place with the "no tunnel is declared, so their routes cannot be identified" log line and no write
