@@ -18,6 +18,8 @@ import (
 //
 //	cf_dns_manager {
 //	    zone <zone> api_token <token> [prune]
+//	    account <account-id> api_token <token>
+//	    tunnel_default_service <service>
 //	    ip_url <url>
 //	    ip6_url <url>
 //	    tag_prefix <prefix>
@@ -39,6 +41,39 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 				return nil, err
 			}
 			app.Zones = append(app.Zones, zc)
+		case "account":
+			if app.AccountID != "" || app.TunnelAPIToken != "" {
+				return nil, d.Errf("account specified more than once")
+			}
+			if !d.NextArg() {
+				return nil, d.Errf("account requires an account id")
+			}
+			accountID := d.Val()
+			if accountID == "" {
+				return nil, d.Errf("account id cannot be empty")
+			}
+			if !d.NextArg() || d.Val() != "api_token" {
+				return nil, d.Errf("account %q: expected 'api_token <token>'", accountID)
+			}
+			if !d.NextArg() {
+				return nil, d.Errf("account %q: missing api_token value", accountID)
+			}
+			app.AccountID = accountID
+			app.TunnelAPIToken = d.Val()
+			if d.NextArg() {
+				return nil, d.ArgErr()
+			}
+		case "tunnel_default_service":
+			if !d.NextArg() {
+				return nil, d.Errf("tunnel_default_service requires a service value")
+			}
+			if err := parseTunnelService(d.Val()); err != nil {
+				return nil, d.Errf("tunnel_default_service: %v", err)
+			}
+			app.TunnelDefaultService = d.Val()
+			if d.NextArg() {
+				return nil, d.ArgErr()
+			}
 		case "ip_url":
 			if !d.NextArg() {
 				return nil, d.ArgErr()
@@ -119,6 +154,8 @@ func parseZone(d *caddyfile.Dispenser) (ZoneConfig, error) {
 //	    ip6 false|auto|<ipv6>  # optional; default false
 //	    proxied yes|no     # optional
 //	    force_adopt        # optional
+//	    tunnel <uuid>      # optional; mutually exclusive with ip/ip6/proxied
+//	    tunnel_service <service>  # optional; requires tunnel
 //	}
 //
 // Each directive manages exactly one host. It validates the declaration at
@@ -267,6 +304,20 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 			if h.NextArg() {
 				return hc, h.ArgErr()
 			}
+		case "tunnel_service":
+			if hc.TunnelService != "" {
+				return hc, h.Errf("tunnel_service specified more than once")
+			}
+			if !h.NextArg() {
+				return hc, h.ArgErr()
+			}
+			if err := parseTunnelService(h.Val()); err != nil {
+				return hc, h.Errf("tunnel_service: %v", err)
+			}
+			hc.TunnelService = h.Val()
+			if h.NextArg() {
+				return hc, h.ArgErr()
+			}
 		default:
 			return hc, h.Errf("unrecognized subdirective: %s", d)
 		}
@@ -287,9 +338,51 @@ func parseHostBlock(h httpcaddyfile.Helper) (HostConfig, error) {
 		if proxiedSet {
 			return hc, h.Errf("tunnel cannot be combined with proxied; a tunnel CNAME is always proxied")
 		}
+	} else if hc.TunnelService != "" {
+		// tunnel_service describes a tunnel ingress rule; without a tunnel
+		// there is no rule to describe, so this is almost certainly a typo
+		// (e.g. a forgotten `tunnel <uuid>`).
+		return hc, h.Errf("tunnel_service requires a tunnel subdirective in the same block; a service route only exists for a tunnel host")
 	}
 
 	return hc, nil
+}
+
+// tunnelServiceSchemes are the service URL schemes Cloudflare Tunnel accepts.
+var tunnelServiceSchemes = []string{
+	"http://", "https://", "unix://", "unix+tls://", "tcp://", "ssh://", "rdp://", "smb://",
+}
+
+// parseTunnelService validates a tunnel ingress service value: either a
+// supported service URL with a non-empty address, or "http_status:<code>".
+// Validation is syntactic only; the API and cloudflared remain the authority
+// on whether a destination is actually reachable.
+func parseTunnelService(val string) error {
+	if val == "" {
+		return fmt.Errorf("service cannot be empty")
+	}
+	if strings.HasPrefix(val, "http_status:") {
+		code := strings.TrimPrefix(val, "http_status:")
+		if len(code) != 3 {
+			return fmt.Errorf("http_status must carry a 3-digit code, got %q", val)
+		}
+		for _, r := range code {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("http_status must carry a 3-digit code, got %q", val)
+			}
+		}
+		return nil
+	}
+	for _, scheme := range tunnelServiceSchemes {
+		if strings.HasPrefix(val, scheme) {
+			if strings.TrimPrefix(val, scheme) == "" {
+				return fmt.Errorf("service %q has no address", val)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported service %q; expected one of %s or http_status:<code>",
+		val, strings.Join(tunnelServiceSchemes, ", "))
 }
 
 // isUUID reports whether s is a canonical 8-4-4-4-12 hexadecimal UUID

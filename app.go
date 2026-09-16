@@ -62,6 +62,21 @@ type App struct {
 	// Instance identifies this Caddy server for ownership tagging.
 	Instance string `json:"instance,omitempty"`
 
+	// AccountID is the Cloudflare account id owning the tunnels whose ingress
+	// this plugin manages. Empty disables ingress management entirely.
+	AccountID string `json:"account_id,omitempty"`
+
+	// TunnelAPIToken is the account-scoped API token (Cloudflare Tunnel Write)
+	// used for Tunnel API calls. It is distinct from the per-zone DNS tokens:
+	// its blast radius covers every tunnel in the account, which is why
+	// ingress management is opt-in.
+	TunnelAPIToken string `json:"tunnel_api_token,omitempty"`
+
+	// TunnelDefaultService is the destination of the catch-all rule written to
+	// every managed tunnel: traffic for hostnames not declared to the plugin.
+	// Empty means the fail-closed default (http_status:404).
+	TunnelDefaultService string `json:"tunnel_default_service,omitempty"`
+
 	// logger is the app logger.
 	logger *zap.Logger `json:"-"`
 
@@ -93,6 +108,10 @@ type HostConfig struct {
 	// <TunnelID>.cfargotunnel.com instead of A/AAAA records. Mutually
 	// exclusive with IP, IP6 and Proxied (enforced at adapt time).
 	TunnelID string `json:"tunnel,omitempty"`
+	// TunnelService overrides the destination this host's tunnel ingress rule
+	// serves, taking precedence over the global tunnel_default_service. It is
+	// only meaningful alongside TunnelID (enforced at adapt time).
+	TunnelService string `json:"tunnel_service,omitempty"`
 	// ZoneConfig is the resolved managed zone (filled at adapt time).
 	ZoneConfig ZoneConfig `json:"-"`
 }
@@ -153,7 +172,21 @@ func (app *App) Validate() error {
 	if app.Instance == "" {
 		return fmt.Errorf("instance cannot be empty")
 	}
+	// The account credential is all-or-nothing: ingress management needs both
+	// halves, and a half-configured credential would silently disable it.
+	if (app.AccountID == "") != (app.TunnelAPIToken == "") {
+		return fmt.Errorf("account and its api_token must be declared together: account is %q and api_token is %s",
+			app.AccountID, setOrUnset(app.TunnelAPIToken))
+	}
 	return nil
+}
+
+// setOrUnset reports whether a value is present, without disclosing it.
+func setOrUnset(val string) string {
+	if val == "" {
+		return "unset"
+	}
+	return "set"
 }
 
 // Start runs reconciliation for every declared host. It also runs when no

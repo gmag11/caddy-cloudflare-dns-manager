@@ -84,10 +84,45 @@ func (app *App) Reconcile(hosts []HostConfig) error {
 	}
 	wg.Wait()
 
+	// Tunnel ingress is reconciled after DNS, in its own phase: a tunnel's
+	// hosts can span zones, so it cannot be folded into the per-zone fan-out
+	// without fragmenting one tunnel's plan across concurrent writes. Failures
+	// here are aggregated alongside zone failures, never fatal, so a Tunnel
+	// API problem cannot leave DNS unreconciled.
+	if err := app.reconcileIngressPhase(ctx, hosts); err != nil {
+		errs = append(errs, err)
+	}
+
 	if len(errs) > 0 {
-		return fmt.Errorf("%d zone(s) failed: %v", len(errs), errs)
+		return fmt.Errorf("%d reconcile operation(s) failed: %v", len(errs), errs)
 	}
 	return nil
+}
+
+// reconcileIngressPhase runs the tunnel ingress reconciliation when a tunnel
+// credential and at least one tunnel host are configured. Without the account
+// credential the plugin must not call the Tunnel API at all, so the phase is
+// skipped with an explanatory log line rather than failing.
+func (app *App) reconcileIngressPhase(ctx context.Context, hosts []HostConfig) error {
+	tunnelHosts := 0
+	for _, hc := range hosts {
+		if hc.TunnelID != "" {
+			tunnelHosts++
+		}
+	}
+	if tunnelHosts == 0 {
+		return nil
+	}
+
+	if app.AccountID == "" || app.TunnelAPIToken == "" {
+		app.logger.Info("tunnel hosts declared but no account credential configured; skipping tunnel ingress management",
+			zap.Int("tunnel_hosts", tunnelHosts),
+			zap.String("hint", "add `account <account-id> api_token <token>` to the global cf_dns_manager block (the token needs account-scoped Cloudflare Tunnel Write)"))
+		return nil
+	}
+
+	cli := newTunnelClientWithBase(app.apiBase, app.AccountID, app.TunnelAPIToken)
+	return reconcileTunnelIngress(ctx, cli, hosts, app.TunnelDefaultService, app.logger)
 }
 
 // familyDetection carries the shared public-IP detection results for one
