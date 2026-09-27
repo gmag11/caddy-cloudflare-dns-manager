@@ -1,8 +1,38 @@
 package cfdnsmanager
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestAddHostRejectsDuplicate(t *testing.T) {
+	app := new(App)
+
+	if err := app.addHost(HostConfig{Host: "foo.example.com"}); err != nil {
+		t.Fatalf("first addHost: %v", err)
+	}
+
+	// The same hostname from a second directive must be rejected, and the
+	// second declaration must not be registered.
+	err := app.addHost(HostConfig{Host: "foo.example.com"})
+	if err == nil {
+		t.Fatal("expected a duplicate host to be rejected")
+	}
+	if !strings.Contains(err.Error(), "foo.example.com") {
+		t.Errorf("error must name the duplicated host, got: %v", err)
+	}
+	if got := len(app.hostsSnapshot()); got != 1 {
+		t.Errorf("got %d hosts after a duplicate, want 1", got)
+	}
+
+	// A distinct host is accepted alongside the first.
+	if err := app.addHost(HostConfig{Host: "bar.example.com"}); err != nil {
+		t.Fatalf("distinct addHost: %v", err)
+	}
+	if got := len(app.hostsSnapshot()); got != 2 {
+		t.Errorf("got %d hosts, want 2", got)
+	}
+}
 
 func TestRecordName(t *testing.T) {
 	cases := []struct {

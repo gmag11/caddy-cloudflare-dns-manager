@@ -9,10 +9,24 @@ import (
 // addHost records a per-site host declaration into the app (called from the
 // no-op handler's Provision). It is safe for concurrent calls because Caddy
 // may provision handlers across goroutines.
-func (app *App) addHost(hc HostConfig) {
+//
+// A hostname may be declared by only one directive. Two directives naming the
+// same host are almost always a copied block whose host was never changed, and
+// letting both through would reconcile the same record twice and build two
+// conflicting tunnel ingress rules. The check runs under the same lock as the
+// append, so concurrent provisioning cannot miss a collision; hc.Host is
+// already normalized (lower case, no trailing dot) by the parser, so a plain
+// string comparison is enough.
+func (app *App) addHost(hc HostConfig) error {
 	app.hostsMu.Lock()
 	defer app.hostsMu.Unlock()
+	for _, existing := range app.hosts {
+		if existing.Host == hc.Host {
+			return fmt.Errorf("host %q is declared more than once; each cf_dns_manager directive must manage a distinct host", hc.Host)
+		}
+	}
 	app.hosts = append(app.hosts, hc)
+	return nil
 }
 
 // hostsSnapshot returns a copy of the accumulated host declarations.

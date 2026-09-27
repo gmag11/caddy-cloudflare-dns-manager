@@ -3,7 +3,7 @@
 Symptoms → causes → fixes, collected from real failures. Log lines are the
 plugin's; Cloudflare error codes appear in `reconcile host failed` messages.
 
-## Adapt-time errors (config never loads)
+## Configuration errors (config never loads)
 
 ### `host ... is not under any declared cf_dns_manager zone`
 
@@ -28,6 +28,15 @@ A per-site `cf_dns_manager` directive exists but no global `cf_dns_manager { zon
 ### `host specified more than once` / `tunnel specified more than once`
 
 One directive manages exactly one host; use separate directives for more hosts.
+
+### `host "..." is declared more than once; each cf_dns_manager directive must manage a distinct host`
+
+Two `cf_dns_manager` directives declare the same hostname. The usual cause is a
+site block that was copied and whose `host` was never changed, so both blocks
+name one record (and, for tunnel hosts, would write conflicting ingress rules).
+Pick one block to own the host and change or remove the other's `host`.
+Reporting happens when Caddy loads the configuration, so `caddy adapt` alone
+does not show it; `caddy validate` or a reload does.
 
 ## Reconcile-time (Caddy loads, DNS does not match)
 

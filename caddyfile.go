@@ -282,8 +282,7 @@ func (hh *hostHandler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("getting %s app for host registration: %v", appName, err)
 	}
 	app := appIface.(*App)
-	app.addHost(hh.Host)
-	return nil
+	return app.addHost(hh.Host)
 }
 
 var _ caddyhttp.MiddlewareHandler = (*hostHandler)(nil)
